@@ -17,6 +17,7 @@ import os
 import sys
 import time
 import json
+import subprocess
 from typing import Any
 
 # ── OTel imports ──────────────────────────────────────────────────────────────
@@ -44,6 +45,35 @@ def _get_exporter() -> "OTLPSpanExporter | None":
             headers[k.strip()] = v.strip()
     return OTLPSpanExporter(endpoint=endpoint, headers=headers)
 
+def get_git_context(cwd: str = "") -> dict[str, str]:
+    """
+    Returns git repo name and remote origin URL for the given working directory.
+    Falls back to empty strings if git isn't available or cwd isn't a repo.
+    """
+    git_attrs: dict[str, str] = {}
+    run_dir = cwd or os.getcwd()
+
+    try:
+        origin = subprocess.check_output(
+            ["git", "remote", "get-url", "origin"],
+            cwd=run_dir,
+            stderr=subprocess.DEVNULL,
+            timeout=2,
+        ).decode().strip()
+        git_attrs["git.origin"] = origin
+
+        # Derive a clean repo name from the URL
+        # handles both https://github.com/org/repo.git and git@github.com:org/repo.git
+        repo_name = origin.rstrip("/")
+        if repo_name.endswith(".git"):
+            repo_name = repo_name[:-4]
+        repo_name = repo_name.split("/")[-1].split(":")[-1]
+        git_attrs["git.repo"] = repo_name
+
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
+        pass
+
+    return git_attrs
 
 def emit_span(
     name: str,
@@ -80,6 +110,10 @@ def emit_span(
     now_ns = time.time_ns()
     start = start_time_ns or now_ns
     end   = end_time_ns   or now_ns
+
+    # merge git context -- uses cwd already in attributes if present
+    git_attrs = get_git_context(attributes.get("cwd", ""))
+    attributes = {**git_attrs, **attributes}   # hook attrs win on collision
 
     # Sanitise: OTel attribute values must be str/int/float/bool or lists thereof
     clean: dict[str, Any] = {}

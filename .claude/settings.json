@@ -92,18 +92,6 @@
       }
     ],
 
-    "PostToolBatch": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python3 ~/.claude/hooks/hook_post_tool_batch.py",
-            "timeout": 10
-          }
-        ]
-      }
-    ],
-
     "Stop": [
       {
         "hooks": [
@@ -208,18 +196,6 @@
           {
             "type": "command",
             "command": "python3 ~/.claude/hooks/hook_notification.py",
-            "timeout": 10
-          }
-        ]
-      }
-    ],
-
-    "CwdChanged": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python3 ~/.claude/hooks/hook_cwd_changed.py",
             "timeout": 10
           }
         ]

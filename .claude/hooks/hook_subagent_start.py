@@ -26,7 +26,6 @@ emit_span(
     {
         "session.id":            session_id,
         "cwd":                   data.get("cwd", ""),
-        "gen_ai.operation.name": "subagent_start",
         "agent.id":              agent_id,
         "agent.type":            data.get("agent_type", "general-purpose"),
     },

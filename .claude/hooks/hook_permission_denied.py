@@ -35,7 +35,6 @@ emit_span(
     {
         "session.id":              session_id,
         "cwd":                     data.get("cwd", ""),
-        "gen_ai.operation.name":   "permission_denied",
         "gen_ai.tool.name":        tool_name,
         "tool_use_id":             tool_use_id,
         "permission.denied":       True,

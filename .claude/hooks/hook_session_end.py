@@ -21,7 +21,6 @@ emit_span(
         "session.id":           data.get("session_id", ""),
         "session.end_reason":   data.get("reason", "other"),
         "cwd":                  data.get("cwd", ""),
-        "gen_ai.operation.name":"session_end",
     },
     start_time_ns=now,
     end_time_ns=now,

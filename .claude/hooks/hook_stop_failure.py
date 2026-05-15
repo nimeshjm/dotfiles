@@ -23,7 +23,6 @@ emit_span(
     {
         "session.id":            data.get("session_id", ""),
         "cwd":                   data.get("cwd", ""),
-        "gen_ai.operation.name": "stop_failure",
         "error.type":            error_type,
     },
     start_time_ns=now,

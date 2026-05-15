@@ -1,7 +1,16 @@
 # Claude Code OTel hooks
 
 Full OpenTelemetry instrumentation for interactive Claude Code sessions,
-via shell-command hooks. Covers every hook event the CLI exposes.
+via shell-command hooks. Covers every meaningful hook event the CLI exposes.
+
+## What this captures
+
+| Dimension | How | Honeycomb derivation |
+|---|---|---|
+| **Session length** | `session.start` + `session.end` spans linked by `session.id` | `MAX(timestamp) - MIN(timestamp) GROUP BY session.id` |
+| **Cost per session** | `gen_ai.request.model` + token counts on every `turn.stop` span | `SUM(input_tokens * price_in) + SUM(output_tokens * price_out) GROUP BY session.id, gen_ai.request.model` |
+| **Cache effectiveness** | `gen_ai.usage.cache_hit_ratio` pre-computed on each stop span | `AVG(gen_ai.usage.cache_hit_ratio) GROUP BY gen_ai.request.model` |
+| **Prompt effectiveness** | `turn.id` links every tool span and the stop span back to the originating prompt | `COUNT(tool spans) GROUP BY turn.id` — tool calls per prompt; filter by `gen_ai.tool.success=false` to find failing turns |
 
 ## Install
 
@@ -21,45 +30,129 @@ pip install opentelemetry-sdk opentelemetry-exporter-otlp-proto-http
 
 | Hook event | Span name | Key attributes |
 |---|---|---|
-| SessionStart | `claude_code.session.start` | session.id, trigger |
-| SessionEnd | `claude_code.session.end` | session.id, end_reason |
-| UserPromptSubmit | `claude_code.user_prompt` | prompt.char_length, prompt.word_count |
-| PreToolUse | `claude_code.tool.pre` | tool.name, tool.type, tool_use_id |
-| PostToolUse | `claude_code.tool` | tool.name, success=true, duration_ms |
-| PostToolUseFailure | `claude_code.tool` | tool.name, success=false, error.message |
-| PostToolBatch | `claude_code.tool_batch` | batch.tool_count, failure_count, max_duration_ms |
-| Stop | `claude_code.turn.stop` | stop_reason, token counts |
+| SessionStart | `claude_code.session.start` | session.id, session.trigger |
+| SessionEnd | `claude_code.session.end` | session.id, session.end_reason |
+| UserPromptSubmit | `claude_code.user_prompt` | turn.id, prompt.char_length, prompt.word_count, command.name* |
+| PostToolUse | `claude_code.tool` | turn.id, gen_ai.tool.name, gen_ai.tool.success=true, tool.duration_ms, edit.lines_added/removed* |
+| PostToolUseFailure | `claude_code.tool` | turn.id, gen_ai.tool.name, gen_ai.tool.success=false, error.message, error.type |
+| Stop | `claude_code.turn.stop` | turn.id, gen_ai.request.model, stop_reason, all 4 token counts, cache_hit_ratio |
 | StopFailure | `claude_code.turn.stop_failure` | error.type |
 | SubagentStart | `claude_code.subagent.start` | agent.id, agent.type |
-| SubagentStop | `claude_code.subagent` | agent.id, duration_ms |
-| PreCompact | `claude_code.context.pre_compact` | tokens_before, trigger |
-| PostCompact | `claude_code.context.compact` | tokens_before, tokens_after, tokens_saved |
-| PermissionRequest | `claude_code.permission.request` | tool.name, permission.mode |
-| PermissionDenied | `claude_code.permission.denied` | tool.name, deny_reason, decision_ms |
-| Notification | `claude_code.notification` | notification.type, message |
-| CwdChanged | `claude_code.cwd_changed` | cwd, cwd.previous |
+| SubagentStop | `claude_code.subagent` | agent.id, agent.type, agent.duration_ms |
+| PreCompact | `claude_code.context.pre_compact` | compaction.trigger, context.tokens_before |
+| PostCompact | `claude_code.context.compact` | compaction.trigger, tokens_before/after/saved, compaction.duration_ms |
+| PermissionRequest | `claude_code.permission.request` | gen_ai.tool.name, tool_use_id, permission.mode |
+| PermissionDenied | `claude_code.permission.denied` | gen_ai.tool.name, permission.deny_reason, permission.decision_ms |
+| Notification | `claude_code.notification` | notification.type, notification.message |
+
+\* `command.name` — only present when prompt starts with `/`  
+\* `edit.lines_added` / `edit.lines_removed` — only present on Edit tool spans  
+\* `write.lines` — only present on Write tool spans
+
+Every span also receives `session.id`, `cwd`, `git.repo`, and `git.origin` from the shared emitter.
+
+**Disabled hooks** (files kept, wiring removed from settings.json):
+- `CwdChanged` — redundant; `cwd` is already on every tool span
+- `PostToolBatch` — reconstructable in Honeycomb by grouping tool spans on `session.id + time`
+- `PreToolUse` — still runs to write the start-time tempfile, but emits no span
+
+## Derived metrics (copy-paste Honeycomb queries)
+
+**Session duration** (while session-as-root-span is not yet implemented):
+```
+WHERE name = "claude_code.session.start" OR name = "claude_code.session.end"
+| GROUP BY session.id
+| MAX(timestamp) - MIN(timestamp) AS session_duration_ms
+```
+
+**Cost per session** (substitute model prices):
+```
+WHERE name = "claude_code.turn.stop"
+| GROUP BY session.id, gen_ai.request.model
+| SUM(gen_ai.usage.input_tokens) AS total_input
+| SUM(gen_ai.usage.output_tokens) AS total_output
+| SUM(gen_ai.usage.cache_read_tokens) AS total_cache_read
+```
+
+**Cache hit ratio over time**:
+```
+WHERE name = "claude_code.turn.stop"
+| HEATMAP(gen_ai.usage.cache_hit_ratio)
+```
+
+**Tool calls per prompt** (requires `turn.id`):
+```
+WHERE name = "claude_code.tool"
+| GROUP BY turn.id, session.id
+| COUNT() AS tools_per_prompt
+| P90(tools_per_prompt)
+```
+
+**Permission friction** (avg decision latency by tool):
+```
+WHERE name = "claude_code.permission.denied"
+| GROUP BY gen_ai.tool.name
+| AVG(permission.decision_ms) AS avg_decision_ms
+| COUNT() AS denial_count
+```
+
+**Lines of code written per session**:
+```
+WHERE name = "claude_code.tool" AND gen_ai.tool.name = "Edit"
+| GROUP BY session.id
+| SUM(edit.lines_added) AS lines_added
+| SUM(edit.lines_removed) AS lines_removed
+```
 
 ## Opt-in content capture
 
-Set in `.claude/settings.json` env section before enabling in production:
+Set in `.claude/settings.json` env section. All off by default.
 
-| Env var | What it adds |
-|---|---|
-| `OTEL_LOG_USER_PROMPTS=1` | Prompt text (first 2000 chars) on `user_prompt` spans |
-| `OTEL_LOG_TOOL_DETAILS=1` | Tool input args on `tool.pre` and `tool` spans |
-| `OTEL_LOG_TOOL_CONTENT=1` | Tool output on `tool` spans |
+| Env var | What it adds | Privacy risk |
+|---|---|---|
+| `OTEL_LOG_USER_PROMPTS=1` | Prompt text (first 2000 chars) on `user_prompt` spans | Sends prompt content to OTLP backend — may contain secrets or PII |
+| `OTEL_LOG_TOOL_DETAILS=1` | Tool input args on `tool` spans | May expose file paths, code, or commands |
+| `OTEL_LOG_TOOL_CONTENT=1` | Tool output on `tool` spans | May expose file contents or command output |
+
+> **Warning**: enabling any of these options ships potentially sensitive text to your OTLP
+> backend (Honeycomb). Review your data retention and access policies before enabling in
+> shared or production environments. Captured text may include API keys, passwords, and
+> personal data.
 
 ## Testing a single hook manually
 
 ```bash
-echo '{"session_id":"test123","cwd":"/tmp","tool_name":"Bash","tool_use_id":"tu_1","tool_input":{"command":"ls"}}' \
-  | python3 .claude/hooks/hook_pre_tool_use.py
+# PostToolUse (Edit tool)
+echo '{"session_id":"test123","cwd":"/tmp","tool_name":"Edit","tool_use_id":"tu_1",
+  "tool_input":{"old_string":"foo","new_string":"bar"},"duration_ms":42}' \
+  | python3 ~/.claude/hooks/hook_post_tool_use.py
+
+# Stop (with model and token usage)
+echo '{"session_id":"test123","cwd":"/tmp","stop_reason":"end_turn",
+  "model":"claude-sonnet-4-6",
+  "usage":{"input_tokens":1000,"output_tokens":200,"cache_read_input_tokens":800,"cache_creation_input_tokens":0}}' \
+  | python3 ~/.claude/hooks/hook_stop.py
 ```
 
 ## Applying globally (all projects)
 
 Put the hooks in `~/.claude/hooks/` and configure `~/.claude/settings.json`.
 Use absolute paths in the command fields instead of `${CLAUDE_PROJECT_DIR}`.
+
+## Known limitations
+
+- **SDK init overhead**: Each hook is a short-lived Python process that instantiates a new
+  `TracerProvider` and `SimpleSpanProcessor` on every call (~100–300ms). For high-frequency
+  tool use sessions, PreToolUse + PostToolUse together add ~200–600ms of latency per tool call.
+- **Tempfile leaks**: Start-time state is coordinated via `/tmp/claude_hook_*`,
+  `/tmp/claude_perm_*`, `/tmp/claude_turn_*`, and `/tmp/claude_compact_*` files. If a hook
+  crashes mid-turn, these files are not cleaned up. They are small and harmless but accumulate.
+- **OTLP protocol mismatch**: `settings.json` sets `OTEL_EXPORTER_OTLP_PROTOCOL=grpc` but the
+  hooks import `opentelemetry.exporter.otlp.proto.http.trace_exporter` (HTTP/protobuf). The env
+  var is ignored; all spans use HTTP/protobuf regardless.
+- **Model fallback**: `gen_ai.request.model` is read from the Stop event payload first, then
+  `ANTHROPIC_MODEL` env. If neither is set (older Claude Code builds), the attribute is empty
+  and cost queries will not work.
 
 ## Files
 
@@ -71,10 +164,9 @@ Use absolute paths in the command fields instead of `${CLAUDE_PROJECT_DIR}`.
     ├── hook_session_start.py
     ├── hook_session_end.py
     ├── hook_user_prompt_submit.py
-    ├── hook_pre_tool_use.py
+    ├── hook_pre_tool_use.py   ← writes start-time tempfile only; no span
     ├── hook_post_tool_use.py
     ├── hook_post_tool_use_failure.py
-    ├── hook_post_tool_batch.py
     ├── hook_stop.py
     ├── hook_stop_failure.py
     ├── hook_subagent_start.py
@@ -83,6 +175,7 @@ Use absolute paths in the command fields instead of `${CLAUDE_PROJECT_DIR}`.
     ├── hook_post_compact.py
     ├── hook_permission_request.py
     ├── hook_permission_denied.py
-    ├── hook_notification.py
-    └── hook_cwd_changed.py
+    ├── hook_notification.py   ← emits only for permission_prompt and idle_prompt
+    ├── hook_cwd_changed.py    ← disabled in settings.json
+    └── hook_post_tool_batch.py ← disabled in settings.json
 ```

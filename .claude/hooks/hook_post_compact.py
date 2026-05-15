@@ -39,7 +39,6 @@ emit_span(
     {
         "session.id":              session_id,
         "cwd":                     data.get("cwd", ""),
-        "gen_ai.operation.name":   "compact",
         "compaction.trigger":      data.get("trigger", "auto"),
         "context.tokens_before":   tokens_before,
         "context.tokens_after":    tokens_after,

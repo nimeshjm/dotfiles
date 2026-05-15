@@ -25,14 +25,17 @@ now               = time.time_ns()
 notification_type = data.get("notification_type", "")
 message           = data.get("message", "")
 
+# Only track actionable / high-value notification types
+if notification_type not in ("permission_prompt", "idle_prompt"):
+    sys.exit(0)
+
 emit_span(
     "claude_code.notification",
     {
-        "session.id":              data.get("session_id", ""),
-        "cwd":                     data.get("cwd", ""),
-        "gen_ai.operation.name":   "notification",
-        "notification.type":       notification_type,
-        "notification.message":    message[:500],
+        "session.id":           data.get("session_id", ""),
+        "cwd":                  data.get("cwd", ""),
+        "notification.type":    notification_type,
+        "notification.message": message[:500],
     },
     start_time_ns=now,
     end_time_ns=now,

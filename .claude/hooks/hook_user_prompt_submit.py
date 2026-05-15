@@ -2,31 +2,42 @@
 """
 hook_user_prompt_submit.py
 Fires each time the user submits a prompt, before Claude processes it.
-Records prompt metadata (NOT the content — toggle OTEL_LOG_USER_PROMPTS to 1 to include it).
+Generates a turn_id that flows through all tool and stop spans for this turn.
 
 stdin fields:
   session_id, cwd, hook_event_name
   prompt: the full prompt text
 """
-import sys, os, time
+import sys, os, time, uuid, tempfile
 sys.path.insert(0, os.path.dirname(__file__))
 from otel_span import read_stdin, emit_span
 
-data   = read_stdin()
-now    = time.time_ns()
-prompt = data.get("prompt", "")
+data       = read_stdin()
+now        = time.time_ns()
+prompt     = data.get("prompt", "")
+session_id = data.get("session_id", "")
+
+# Generate a turn_id and persist it — PreToolUse/PostToolUse/Stop read it
+turn_id   = str(uuid.uuid4())
+turn_file = os.path.join(tempfile.gettempdir(), f"claude_turn_{session_id}.id")
+with open(turn_file, "w") as f:
+    f.write(turn_id)
 
 attrs = {
-    "session.id":              data.get("session_id", ""),
-    "cwd":                     data.get("cwd", ""),
-    "gen_ai.operation.name":   "user_prompt_submit",
-    "prompt.char_length":      len(prompt),
-    "prompt.word_count":       len(prompt.split()),
+    "session.id":         session_id,
+    "cwd":                data.get("cwd", ""),
+    "turn.id":            turn_id,
+    "prompt.char_length": len(prompt),
+    "prompt.word_count":  len(prompt.split()),
 }
 
-# Opt-in: include actual prompt text only when env var is set
+# Tag slash commands so skill/command usage is queryable
+stripped = prompt.lstrip()
+if stripped.startswith("/"):
+    attrs["command.name"] = stripped.split()[0] if stripped.split() else "/"
+
 if os.environ.get("OTEL_LOG_USER_PROMPTS") == "1":
-    attrs["gen_ai.prompt"] = prompt[:2000]  # cap at 2 KB
+    attrs["gen_ai.prompt"] = prompt[:2000]
 
 emit_span(
     "claude_code.user_prompt",

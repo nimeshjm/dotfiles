@@ -36,14 +36,10 @@ except ImportError:
 def _get_exporter() -> "OTLPSpanExporter | None":
     if not _OTEL_AVAILABLE:
         return None
-    endpoint = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", "")
-    headers_raw = os.environ.get("OTEL_EXPORTER_OTLP_HEADERS", "")
-    headers: dict[str, str] = {}
-    for part in headers_raw.split(","):
-        if "=" in part:
-            k, v = part.strip().split("=", 1)
-            headers[k.strip()] = v.strip()
-    return OTLPSpanExporter(endpoint=endpoint, headers=headers)
+    if not os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", ""):
+        return None
+    # Let the SDK read endpoint/headers from env vars — it correctly appends /v1/traces
+    return OTLPSpanExporter()
 
 def get_git_context(cwd: str = "") -> dict[str, str]:
     """
@@ -125,18 +121,12 @@ def emit_span(
         else:
             clean[k] = str(v)
 
-    with tracer.start_as_current_span(
-        name,
-        kind=SpanKind.INTERNAL,
-        start_time=start,
-        attributes=clean,
-    ) as span:
-        if not status_ok:
-            span.set_status(StatusCode.ERROR, error_message)
-        else:
-            span.set_status(StatusCode.OK)
-        # manually set end time
-        span._end_time = end  # type: ignore[attr-defined]
+    span = tracer.start_span(name, kind=SpanKind.INTERNAL, start_time=start, attributes=clean)
+    if not status_ok:
+        span.set_status(StatusCode.ERROR, error_message)
+    else:
+        span.set_status(StatusCode.OK)
+    span.end(end_time=end)
 
     provider.force_flush(timeout_millis=3_000)
     provider.shutdown()

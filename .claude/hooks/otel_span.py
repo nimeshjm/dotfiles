@@ -33,9 +33,36 @@ except ImportError:
     _OTEL_AVAILABLE = False
 
 
+def _load_settings_env() -> None:
+    """
+    Hook subprocesses don't inherit the env block from settings.json — Claude Code
+    uses those vars internally but doesn't inject them into child processes.
+    This fallback reads settings.json (then settings.local.json) and injects any
+    OTEL_* vars that aren't already in the environment.
+    """
+    if os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT"):
+        return  # already set; nothing to do
+
+    settings_dir = os.path.expanduser("~/.claude")
+    merged: dict[str, str] = {}
+    for fname in ("settings.json", "settings.local.json"):
+        try:
+            with open(os.path.join(settings_dir, fname)) as f:
+                data = json.load(f)
+            for k, v in data.get("env", {}).items():
+                merged[k] = str(v)
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            pass
+
+    for k, v in merged.items():
+        if k.startswith("OTEL_") and k not in os.environ:
+            os.environ[k] = v
+
+
 def _get_exporter() -> "OTLPSpanExporter | None":
     if not _OTEL_AVAILABLE:
         return None
+    _load_settings_env()
     if not os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", ""):
         return None
     # Let the SDK read endpoint/headers from env vars — it correctly appends /v1/traces
@@ -89,15 +116,18 @@ def emit_span(
         print(f"[otel_span] OTel not available — span '{name}' not exported", file=sys.stderr)
         return
 
+    # Must run before reading any OTEL_* env vars — hooks don't inherit them from Claude Code
+    _load_settings_env()
+
+    exporter = _get_exporter()
+    if exporter is None:
+        return
+
     service_name = os.environ.get("OTEL_SERVICE_NAME", "claude-code-interactive")
     resource = Resource.create({
         "service.name": service_name,
         "gen_ai.system": "anthropic",
     })
-
-    exporter = _get_exporter()
-    if exporter is None:
-        return
 
     provider = TracerProvider(resource=resource)
     provider.add_span_processor(SimpleSpanProcessor(exporter))

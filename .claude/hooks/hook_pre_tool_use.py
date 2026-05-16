@@ -10,7 +10,7 @@ stdin fields:
   tool_name, tool_use_id, tool_input (dict — contents vary by tool)
 """
 import sys, os, time, tempfile
-sys.path.insert(0, os.path.dirname(__file__))
+sys.path.insert(0, os.path.expanduser(os.path.dirname(os.path.abspath(__file__))))
 from otel_span import read_stdin
 
 data        = read_stdin()

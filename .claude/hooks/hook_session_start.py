@@ -8,7 +8,7 @@ stdin fields:
   trigger: "startup" | "resume" | "clear" | "compact"
 """
 import sys, os, time
-sys.path.insert(0, os.path.dirname(__file__))
+sys.path.insert(0, os.path.expanduser(os.path.dirname(os.path.abspath(__file__))))
 from otel_span import read_stdin, emit_span
 
 data = read_stdin()

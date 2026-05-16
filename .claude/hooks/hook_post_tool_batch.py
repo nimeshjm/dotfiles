@@ -9,7 +9,7 @@ stdin fields:
   tool_results: list of { tool_name, tool_use_id, success, duration_ms }
 """
 import sys, os, time, json
-sys.path.insert(0, os.path.dirname(__file__))
+sys.path.insert(0, os.path.expanduser(os.path.dirname(os.path.abspath(__file__))))
 from otel_span import read_stdin, emit_span
 
 data         = read_stdin()

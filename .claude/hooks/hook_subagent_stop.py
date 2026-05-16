@@ -8,7 +8,7 @@ stdin fields:
   agent_id, agent_type
 """
 import sys, os, time, tempfile
-sys.path.insert(0, os.path.dirname(__file__))
+sys.path.insert(0, os.path.expanduser(os.path.dirname(os.path.abspath(__file__))))
 from otel_span import read_stdin, emit_span
 
 data       = read_stdin()

@@ -10,7 +10,7 @@ stdin fields:
   context_size_tokens (tokens after compaction)
 """
 import sys, os, time, json, tempfile
-sys.path.insert(0, os.path.dirname(__file__))
+sys.path.insert(0, os.path.expanduser(os.path.dirname(os.path.abspath(__file__))))
 from otel_span import read_stdin, emit_span
 
 data       = read_stdin()

@@ -17,6 +17,18 @@ from otel_span import read_stdin, emit_span, _state_path
 
 data        = read_stdin()
 now         = time.time_ns()
+
+# Capture raw payload so field names can be verified if token counts are zero.
+# Read the file after any session: cat ~/.cache/claude-hooks/last_stop_payload.json
+try:
+    import json as _json
+    _debug_dir = os.path.expanduser("~/.cache/claude-hooks")
+    os.makedirs(_debug_dir, mode=0o700, exist_ok=True)
+    with open(os.path.join(_debug_dir, "last_stop_payload.json"), "w") as _f:
+        _json.dump(data, _f, indent=2)
+except OSError:
+    pass
+
 usage       = data.get("usage", {}) or {}
 stop_reason = data.get("stop_reason", "unknown")
 session_id  = data.get("session_id", "")

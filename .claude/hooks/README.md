@@ -7,7 +7,7 @@ via shell-command hooks. Covers every meaningful hook event the CLI exposes.
 
 | Dimension | How | Honeycomb derivation |
 |---|---|---|
-| **Session length** | `session.start` + `session.end` spans linked by `session.id` | `MAX(timestamp) - MIN(timestamp) GROUP BY session.id` |
+| **Session length** | `session.duration_ms` on each `session.end` span (computed from start-time state file) | `MAX(session.duration_ms) GROUP BY session.id` |
 | **Cost per session** | `gen_ai.request.model` + token counts on every `turn.stop` span | `SUM(input_tokens * price_in) + SUM(output_tokens * price_out) GROUP BY session.id, gen_ai.request.model` |
 | **Cache effectiveness** | `gen_ai.usage.cache_hit_ratio` pre-computed on each stop span | `AVG(gen_ai.usage.cache_hit_ratio) GROUP BY gen_ai.request.model` |
 | **Prompt effectiveness** | `turn.id` links every tool span and the stop span back to the originating prompt | `COUNT(tool spans) GROUP BY turn.id` — tool calls per prompt; filter by `gen_ai.tool.success=false` to find failing turns |
@@ -62,50 +62,111 @@ Every span also receives `session.id`, `cwd`, `git.repo`, and `git.origin` from 
 
 ## Derived metrics (copy-paste Honeycomb queries)
 
-**Session duration** (while session-as-root-span is not yet implemented):
-```
-WHERE name = "claude_code.session.start" OR name = "claude_code.session.end"
-| GROUP BY session.id
-| MAX(timestamp) - MIN(timestamp) AS session_duration_ms
+Paste any of these into the Honeycomb query builder: **New Query → `{ }` JSON icon → paste**. Adjust `time_range` (seconds) as needed: `86400` = 24h, `604800` = 7d.
+
+**Session duration**:
+```json
+{
+  "time_range": 86400,
+  "calculations": [
+    {"op": "MAX", "column": "session.duration_ms"}
+  ],
+  "filters": [
+    {"column": "name", "op": "=", "value": "claude_code.session.end"}
+  ],
+  "filter_combination": "AND",
+  "breakdowns": ["session.id"],
+  "orders": [{"op": "MAX", "column": "session.duration_ms", "order": "descending"}],
+  "limit": 100
+}
 ```
 
 **Cost per session** (substitute model prices):
-```
-WHERE name = "claude_code.turn.stop"
-| GROUP BY session.id, gen_ai.request.model
-| SUM(gen_ai.usage.input_tokens) AS total_input
-| SUM(gen_ai.usage.output_tokens) AS total_output
-| SUM(gen_ai.usage.cache_read_tokens) AS total_cache_read
+```json
+{
+  "time_range": 86400,
+  "calculations": [
+    {"op": "SUM", "column": "gen_ai.usage.input_tokens"},
+    {"op": "SUM", "column": "gen_ai.usage.output_tokens"},
+    {"op": "SUM", "column": "gen_ai.usage.cache_read_tokens"}
+  ],
+  "filters": [
+    {"column": "name", "op": "=", "value": "claude_code.turn.stop"}
+  ],
+  "filter_combination": "AND",
+  "breakdowns": ["session.id", "gen_ai.request.model"],
+  "orders": [{"op": "SUM", "column": "gen_ai.usage.input_tokens", "order": "descending"}],
+  "limit": 100
+}
 ```
 
 **Cache hit ratio over time**:
-```
-WHERE name = "claude_code.turn.stop"
-| HEATMAP(gen_ai.usage.cache_hit_ratio)
+```json
+{
+  "time_range": 86400,
+  "calculations": [
+    {"op": "HEATMAP", "column": "gen_ai.usage.cache_hit_ratio"}
+  ],
+  "filters": [
+    {"column": "name", "op": "=", "value": "claude_code.turn.stop"}
+  ],
+  "filter_combination": "AND",
+  "limit": 10
+}
 ```
 
 **Tool calls per prompt** (requires `turn.id`):
-```
-WHERE name = "claude_code.tool"
-| GROUP BY turn.id, session.id
-| COUNT() AS tools_per_prompt
-| P90(tools_per_prompt)
+```json
+{
+  "time_range": 86400,
+  "calculations": [
+    {"op": "COUNT"}
+  ],
+  "filters": [
+    {"column": "name", "op": "=", "value": "claude_code.tool"}
+  ],
+  "filter_combination": "AND",
+  "breakdowns": ["turn.id", "session.id"],
+  "orders": [{"op": "COUNT", "order": "descending"}],
+  "limit": 100
+}
 ```
 
 **Permission friction** (avg decision latency by tool):
-```
-WHERE name = "claude_code.permission.denied"
-| GROUP BY gen_ai.tool.name
-| AVG(permission.decision_ms) AS avg_decision_ms
-| COUNT() AS denial_count
+```json
+{
+  "time_range": 86400,
+  "calculations": [
+    {"op": "AVG", "column": "permission.decision_ms"},
+    {"op": "COUNT"}
+  ],
+  "filters": [
+    {"column": "name", "op": "=", "value": "claude_code.permission.denied"}
+  ],
+  "filter_combination": "AND",
+  "breakdowns": ["gen_ai.tool.name"],
+  "orders": [{"op": "AVG", "column": "permission.decision_ms", "order": "descending"}],
+  "limit": 25
+}
 ```
 
 **Lines of code written per session**:
-```
-WHERE name = "claude_code.tool" AND gen_ai.tool.name = "Edit"
-| GROUP BY session.id
-| SUM(edit.lines_added) AS lines_added
-| SUM(edit.lines_removed) AS lines_removed
+```json
+{
+  "time_range": 86400,
+  "calculations": [
+    {"op": "SUM", "column": "edit.lines_added"},
+    {"op": "SUM", "column": "edit.lines_removed"}
+  ],
+  "filters": [
+    {"column": "name", "op": "=", "value": "claude_code.tool"},
+    {"column": "gen_ai.tool.name", "op": "=", "value": "Edit"}
+  ],
+  "filter_combination": "AND",
+  "breakdowns": ["session.id"],
+  "orders": [{"op": "SUM", "column": "edit.lines_added", "order": "descending"}],
+  "limit": 100
+}
 ```
 
 ## Opt-in content capture

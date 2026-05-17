@@ -9,7 +9,7 @@ stdin fields:
           "bypass_permissions_disabled" | "other"
 """
 import sys, os, time
-sys.path.insert(0, os.path.expanduser(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from otel_span import read_stdin, emit_span
 
 data = read_stdin()

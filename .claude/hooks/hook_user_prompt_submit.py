@@ -8,9 +8,9 @@ stdin fields:
   session_id, cwd, hook_event_name
   prompt: the full prompt text
 """
-import sys, os, time, uuid, tempfile
-sys.path.insert(0, os.path.expanduser(os.path.dirname(os.path.abspath(__file__))))
-from otel_span import read_stdin, emit_span
+import sys, os, time, uuid
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from otel_span import read_stdin, emit_span, _open_state_file
 
 data       = read_stdin()
 now        = time.time_ns()
@@ -18,10 +18,12 @@ prompt     = data.get("prompt", "")
 session_id = data.get("session_id", "")
 
 # Generate a turn_id and persist it — PreToolUse/PostToolUse/Stop read it
-turn_id   = str(uuid.uuid4())
-turn_file = os.path.join(tempfile.gettempdir(), f"claude_turn_{session_id}.id")
-with open(turn_file, "w") as f:
-    f.write(turn_id)
+turn_id = str(uuid.uuid4())
+try:
+    with _open_state_file(f"claude_turn_{session_id}.id") as f:
+        f.write(turn_id)
+except OSError:
+    pass
 
 attrs = {
     "session.id":         session_id,

@@ -11,9 +11,9 @@ stdin fields:
   usage: { input_tokens, output_tokens, cache_creation_input_tokens,
            cache_read_input_tokens }
 """
-import sys, os, time, tempfile
-sys.path.insert(0, os.path.expanduser(os.path.dirname(os.path.abspath(__file__))))
-from otel_span import read_stdin, emit_span
+import sys, os, time
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from otel_span import read_stdin, emit_span, _state_path
 
 data        = read_stdin()
 now         = time.time_ns()
@@ -23,7 +23,7 @@ session_id  = data.get("session_id", "")
 
 # Read and clear the turn_id written by UserPromptSubmit
 turn_id   = ""
-turn_file = os.path.join(tempfile.gettempdir(), f"claude_turn_{session_id}.id")
+turn_file = _state_path(f"claude_turn_{session_id}.id")
 if os.path.exists(turn_file):
     try:
         with open(turn_file) as f:

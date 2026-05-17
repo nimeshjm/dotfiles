@@ -51,10 +51,14 @@ pip install opentelemetry-sdk opentelemetry-exporter-otlp-proto-http
 
 Every span also receives `session.id`, `cwd`, `git.repo`, and `git.origin` from the shared emitter.
 
+> **Note on `git.*` attributes**: only SSH-shaped remotes (`git@host:org/repo.git`) populate
+> `git.origin` and `git.repo`. Repos using HTTPS remotes will show empty `git.*` attributes
+> by design — HTTPS URLs may contain embedded credentials and are never exported to spans.
+
 **Disabled hooks** (files kept, wiring removed from settings.json):
 - `CwdChanged` — redundant; `cwd` is already on every tool span
 - `PostToolBatch` — reconstructable in Honeycomb by grouping tool spans on `session.id + time`
-- `PreToolUse` — still runs to write the start-time tempfile, but emits no span
+- `PreToolUse` — still runs to write the start-time state file, but emits no span
 
 ## Derived metrics (copy-paste Honeycomb queries)
 
@@ -144,9 +148,11 @@ Use absolute paths in the command fields instead of `${CLAUDE_PROJECT_DIR}`.
 - **SDK init overhead**: Each hook is a short-lived Python process that instantiates a new
   `TracerProvider` and `SimpleSpanProcessor` on every call (~100–300ms). For high-frequency
   tool use sessions, PreToolUse + PostToolUse together add ~200–600ms of latency per tool call.
-- **Tempfile leaks**: Start-time state is coordinated via `/tmp/claude_hook_*`,
-  `/tmp/claude_perm_*`, `/tmp/claude_turn_*`, and `/tmp/claude_compact_*` files. If a hook
-  crashes mid-turn, these files are not cleaned up. They are small and harmless but accumulate.
+- **State file leaks**: Start-time state is coordinated via `~/.cache/claude-hooks/` (files
+  named `claude_hook_*`, `claude_perm_*`, `claude_turn_*`, `claude_compact_*`). The directory
+  is created with mode `0700`; files are written with `O_NOFOLLOW` to resist symlink attacks.
+  If a hook crashes mid-turn, orphaned files are not cleaned up — they are small and harmless
+  but accumulate over time.
 - **OTLP protocol mismatch**: `settings.json` sets `OTEL_EXPORTER_OTLP_PROTOCOL=grpc` but the
   hooks import `opentelemetry.exporter.otlp.proto.http.trace_exporter` (HTTP/protobuf). The env
   var is ignored; all spans use HTTP/protobuf regardless.
@@ -164,7 +170,7 @@ Use absolute paths in the command fields instead of `${CLAUDE_PROJECT_DIR}`.
     ├── hook_session_start.py
     ├── hook_session_end.py
     ├── hook_user_prompt_submit.py
-    ├── hook_pre_tool_use.py   ← writes start-time tempfile only; no span
+    ├── hook_pre_tool_use.py   ← writes start-time state file only; no span
     ├── hook_post_tool_use.py
     ├── hook_post_tool_use_failure.py
     ├── hook_stop.py
@@ -177,5 +183,7 @@ Use absolute paths in the command fields instead of `${CLAUDE_PROJECT_DIR}`.
     ├── hook_permission_denied.py
     ├── hook_notification.py   ← emits only for permission_prompt and idle_prompt
     ├── hook_cwd_changed.py    ← disabled in settings.json
-    └── hook_post_tool_batch.py ← disabled in settings.json
+    ├── hook_post_tool_batch.py ← disabled in settings.json
+    └── dev/
+        └── dump_env.py        ← dev tool: dump subprocess env vars (not a configured hook)
 ```

@@ -7,8 +7,8 @@
     "OTEL_LOGS_EXPORTER": "otlp",
     "OTEL_EXPORTER_OTLP_PROTOCOL": "grpc",
     "OTEL_EXPORTER_OTLP_ENDPOINT": "https://api.honeycomb.io",
-    "OTEL_EXPORTER_OTLP_HEADERS": "x-honeycomb-team=YOUR_API_KEY,x-honeycomb-dataset=claude-code",
-    "OTEL_SERVICE_NAME": "claude-code-interactive",
+    "OTEL_EXPORTER_OTLP_HEADERS": "x-honeycomb-team=YOUR_API_KEYß",
+    "OTEL_SERVICE_NAME": "claude-code",
 
     "OTEL_LOG_USER_PROMPTS": "0",
     "OTEL_LOG_TOOL_DETAILS": "0",

@@ -127,7 +127,7 @@ def emit_span(
     if exporter is None:
         return
 
-    service_name = os.environ.get("OTEL_SERVICE_NAME", "claude-code-interactive")
+    service_name = os.environ.get("OTEL_SERVICE_NAME", "claude-code")
     resource = Resource.create({
         "service.name": service_name,
         "gen_ai.system": "anthropic",

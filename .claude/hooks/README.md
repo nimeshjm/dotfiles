@@ -15,16 +15,42 @@ via shell-command hooks. Covers every meaningful hook event the CLI exposes.
 ## Install
 
 ```bash
-# 1. Copy the .claude/ folder into your project root (or ~/.claude/ for global)
-cp -r .claude/ /your/project/.claude/
+# 1. Run the installer (copies hooks, merges settings.json)
+cd dotfiles/.claude
+./install.sh
 
 # 2. Install OTel Python packages (once per machine)
 pip install opentelemetry-sdk opentelemetry-exporter-otlp-proto-http
 
-# 3. Edit .claude/settings.json
-#    Replace YOUR_API_KEY with your Honeycomb ingest key.
+# 3. Edit ~/.claude/settings.json
+#    Set OTEL_EXPORTER_OTLP_HEADERS to your Honeycomb ingest key (see below).
 #    Or swap OTEL_EXPORTER_OTLP_ENDPOINT for any OTLP backend.
 ```
+
+### API keys
+
+Two separate Honeycomb keys are used, with different scopes:
+
+| Key | Purpose | Where used |
+|-----|---------|------------|
+| **Ingest key** (`hcaik_…`) | Send spans to Honeycomb | `OTEL_EXPORTER_OTLP_HEADERS` in `settings.json` |
+| **Configuration key** | Create boards and queries via the Management API | `HONEYCOMB_CONFIG_KEY` env var at install time |
+
+**Getting an ingest key**: Honeycomb UI → *Team Settings* → *API Keys* → *Create Ingest Key*.
+
+**Getting a configuration key**: Honeycomb UI → *Team Settings* → *API Keys* → *Create API Key*.
+Under *Permissions*, enable at minimum: **Events**, **Boards**. Queries permission is not required — `install.sh` uses the board-creation path, which handles query creation internally.
+
+### Creating the Honeycomb board
+
+`install.sh` automatically creates the [Claude Code Sessions](#honeycomb-board) board if `HONEYCOMB_CONFIG_KEY` is set:
+
+```bash
+export HONEYCOMB_CONFIG_KEY=<your-config-key>
+./install.sh
+```
+
+The board creation step is idempotent — it skips silently if a board named *Claude Code Sessions* already exists. If `HONEYCOMB_CONFIG_KEY` is unset, the hook install still completes and the board step is skipped without error.
 
 ## Spans emitted
 
@@ -169,6 +195,65 @@ Paste any of these into the Honeycomb query builder: **New Query → `{ }` JSON 
 }
 ```
 
+## Honeycomb board
+
+`install.sh` creates a pre-built **Claude Code Sessions** board in the `claude` environment with 16 panels arranged in logical groups:
+
+**Row 1 — Activity counts** (timeseries graphs)
+
+| Panel | Query | Display |
+|-------|-------|---------|
+| Sessions Started | `COUNT` of `claude_code.session.start` | Timeseries graph |
+| Tool Calls | `COUNT` of `claude_code.tool` | Timeseries graph |
+| User Prompts | `COUNT` of `claude_code.user_prompt` | Timeseries graph |
+
+**Row 2 — Session health** (timeseries graphs)
+
+| Panel | Query | Display |
+|-------|-------|---------|
+| Session Duration (avg + p95) | `AVG` + `P95` of `session.duration_ms` on `claude_code.session.end` | Timeseries graph |
+| Cache Hit Ratio | `AVG(gen_ai.usage.cache_hit_ratio)` on `claude_code.turn.stop` | Timeseries graph |
+| Model Usage | `COUNT` of `claude_code.turn.stop`, breakdown by `gen_ai.request.model` | Timeseries graph |
+
+**Row 3 — Token usage** (full-width timeseries)
+
+| Panel | Query | Display |
+|-------|-------|---------|
+| Token Usage | `SUM(input_tokens)` + `SUM(cache_read_tokens)` + `SUM(output_tokens)` on `claude_code.turn.stop` | Timeseries graph |
+
+**Rows 4–6 — Tool and session tables**
+
+| Panel | Query | Display |
+|-------|-------|---------|
+| Tool Failure Rate % | `failed / total * 100` formula, breakdown by `gen_ai.tool.name` | Table |
+| Tool Duration (avg + p95) | `AVG` + `P95` of `tool.duration_ms`, breakdown by `gen_ai.tool.name` | Table |
+| Lines Edited per Session | `SUM(edit.lines_added)` + `SUM(edit.lines_removed)`, breakdown by `session.id` | Table |
+| Prompts per Session | `COUNT` of `claude_code.user_prompt`, breakdown by `session.id` | Table |
+| Tokens per Session | `SUM` of input + cache + output tokens, breakdown by `session.id` | Table |
+
+**Row 7 — Diagnostics**
+
+| Panel | Query | Display |
+|-------|-------|---------|
+| Stop Reason Distribution | `COUNT` of `claude_code.turn.stop`, breakdown by `agent.stop_reason` | Table |
+| Subagent Activity | `COUNT` + `AVG(agent.duration_ms)` of `claude_code.subagent`, breakdown by `agent.type` | Table |
+| Context Compaction | `COUNT` + `SUM(context.tokens_saved)` of `claude_code.context.compact` | Table |
+
+**Row 8 — Permissions**
+
+| Panel | Query | Display |
+|-------|-------|---------|
+| Permission Denials | `COUNT` of `claude_code.permission.denied`, breakdown by `gen_ai.tool.name` | Table |
+
+All panels default to the last 24 h. The board time window can be changed interactively in the Honeycomb UI without affecting the saved queries.
+
+To recreate the board after deleting it, delete the existing one in the UI then re-run:
+
+```bash
+export HONEYCOMB_CONFIG_KEY=<your-config-key>
+./install.sh
+```
+
 ## Opt-in content capture
 
 Set in `.claude/settings.json` env section. All off by default.
@@ -225,6 +310,7 @@ Use absolute paths in the command fields instead of `${CLAUDE_PROJECT_DIR}`.
 
 ```
 .claude/
+├── install.sh                 ← copies hooks, merges settings.json, creates Honeycomb board
 ├── settings.json              ← hook wiring + OTel env vars
 └── hooks/
     ├── otel_span.py           ← shared OTLP emitter (imported by all hooks)

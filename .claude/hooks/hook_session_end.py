@@ -36,5 +36,5 @@ emit_span(
         "cwd":                 data.get("cwd", ""),
     },
     start_time_ns=now,
-    end_time_ns=now,
+    end_time_ns=now + 1_000_000,
 )

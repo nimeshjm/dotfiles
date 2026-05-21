@@ -2,18 +2,11 @@
 import json
 import os
 import shutil
-import sys
 import tempfile
-import urllib.error
-import urllib.request
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).parent
 HOME_CLAUDE = Path.home() / ".claude"
-API_BASE = "https://api.honeycomb.io/1"
-DATASET = "claude-code"
-BOARD_NAME = "Claude Code Sessions"
 
 # ---------------------------------------------------------------------------
 # Settings merge
@@ -71,28 +64,15 @@ def merge_settings():
 
 
 # ---------------------------------------------------------------------------
-# Honeycomb board
+# Honeycomb board definition
+#
+# This is the canonical panel spec for the "Claude Code Sessions" board.
+# To create the board, open Claude Code in this repo and prompt:
+#   "Create a Honeycomb board called 'Claude Code Sessions' based on
+#    the PANELS definition in install.py"
+# Claude will read this file, run each query via the Honeycomb MCP, and
+# create the board — no management key required.
 # ---------------------------------------------------------------------------
-
-COLUMN_DEFS = [
-    ("session.duration_ms",          "float"),
-    ("session.id",                   "string"),
-    ("session.end_reason",           "string"),
-    ("gen_ai.usage.cache_hit_ratio", "float"),
-    ("gen_ai.request.model",         "string"),
-    ("gen_ai.usage.input_tokens",    "integer"),
-    ("gen_ai.usage.cache_read_tokens","integer"),
-    ("gen_ai.usage.output_tokens",   "integer"),
-    ("tool.duration_ms",             "float"),
-    ("gen_ai.tool.name",             "string"),
-    ("gen_ai.tool.success",          "boolean"),
-    ("edit.lines_added",             "integer"),
-    ("edit.lines_removed",           "integer"),
-    ("agent.stop_reason",            "string"),
-    ("agent.duration_ms",            "float"),
-    ("agent.type",                   "string"),
-    ("context.tokens_saved",         "integer"),
-]
 
 PANELS = [
     # Row 0 (y=0, h=6): Activity counts
@@ -213,87 +193,6 @@ PANELS = [
 ]
 
 
-def _hc(api_key, method, path, body=None):
-    data = json.dumps(body).encode() if body is not None else None
-    req = urllib.request.Request(
-        f"{API_BASE}/{path}",
-        data=data,
-        headers={"X-Honeycomb-Team": api_key, "Content-Type": "application/json"},
-        method=method,
-    )
-    try:
-        with urllib.request.urlopen(req) as resp:
-            return json.loads(resp.read())
-    except urllib.error.HTTPError as e:
-        body_text = e.read().decode(errors="replace")
-        raise urllib.error.HTTPError(e.url, e.code, f"{e.reason} — {body_text}", e.headers, None) from None
-
-
-def ensure_columns(api_key):
-    existing = {c["key_name"] for c in _hc(api_key, "GET", f"columns/{DATASET}")}
-    missing = [(k, t) for k, t in COLUMN_DEFS if k not in existing]
-    if not missing:
-        return
-    def _create(kt):
-        key, typ = kt
-        try:
-            _hc(api_key, "POST", f"columns/{DATASET}", {"key_name": key, "type": typ})
-        except urllib.error.HTTPError as e:
-            if e.code != 409:  # 409 = already exists, safe to ignore
-                raise
-    with ThreadPoolExecutor(max_workers=8) as pool:
-        list(pool.map(_create, missing))
-
-
-def create_honeycomb_board(api_key):
-    boards = _hc(api_key, "GET", "boards")
-    existing = next((b["links"]["board_url"] for b in boards if b["name"] == BOARD_NAME), None)
-    if existing:
-        print(f"  Honeycomb board already exists: {existing}")
-        return
-
-    print("  ensuring dataset columns exist...")
-    ensure_columns(api_key)
-    print("  creating Honeycomb queries...")
-    with ThreadPoolExecutor(max_workers=8) as pool:
-        query_ids = list(pool.map(
-            lambda p: _hc(api_key, "POST", f"queries/{DATASET}", p["spec"])["id"],
-            PANELS,
-        ))
-
-    print("  creating query annotations...")
-    with ThreadPoolExecutor(max_workers=8) as pool:
-        annotation_ids = list(pool.map(
-            lambda p, qid: _hc(api_key, "POST", f"query_annotations/{DATASET}", {
-                "query_id": qid, "name": p["name"], "description": p["desc"],
-            })["id"],
-            PANELS, query_ids,
-        ))
-
-    print("  creating board...")
-    graph_vis = {"charts": [{"chart_type": "default", "chart_index": 0, "omit_missing_values": True}]}
-    board_panels = [
-        {
-            "type": "query",
-            "position": {"x_coordinate": p["x"], "y_coordinate": p["y"], "height": p["h"], "width": p["w"]},
-            "query_panel": {
-                "query_id": qid,
-                "query_annotation_id": aid,
-                "query_style": p["style"],
-                **({"visualization_settings": graph_vis} if p["style"] == "graph" else {}),
-            },
-        }
-        for p, qid, aid in zip(PANELS, query_ids, annotation_ids)
-    ]
-    result = _hc(api_key, "POST", "boards", {
-        "name": BOARD_NAME,
-        "description": "Session health and productivity metrics from OTel hooks. Timeless view.",
-        "type": "flexible",
-        "panels": board_panels,
-    })
-    print(f"  board created: {result['links']['board_url']}")
-
-
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
@@ -301,15 +200,13 @@ def create_honeycomb_board(api_key):
 def main():
     install_hooks()
     merge_settings()
-
-    api_key = os.environ.get("HONEYCOMB_CONFIG_KEY", "")
-    if api_key:
-        print("Creating Honeycomb board...")
-        try:
-            create_honeycomb_board(api_key)
-        except urllib.error.HTTPError as e:
-            print(f"  ERROR: Honeycomb API returned {e.code}: {e.reason}")
-            sys.exit(1)
+    print("Hooks and settings installed.")
+    print()
+    print("To create the Honeycomb dashboard, open Claude Code in this repo and prompt:")
+    print('  "Create a Honeycomb board called \'Claude Code Sessions\' based on')
+    print('   the PANELS definition in install.py"')
+    print()
+    print("Requires the Honeycomb MCP server configured in Claude Code.")
 
 
 if __name__ == "__main__":

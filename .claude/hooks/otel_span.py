@@ -36,10 +36,14 @@ except ImportError:
 def _get_exporter() -> "OTLPSpanExporter | None":
     if not _OTEL_AVAILABLE:
         return None
-    if not os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", ""):
+    endpoint = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", "").rstrip("/")
+    if not endpoint:
         return None
-    # Let the SDK read endpoint/headers from env vars — it correctly appends /v1/traces
-    return OTLPSpanExporter()
+    headers_raw = os.environ.get("OTEL_EXPORTER_OTLP_HEADERS", "")
+    headers = dict(
+        kv.split("=", 1) for kv in headers_raw.split(",") if "=" in kv
+    )
+    return OTLPSpanExporter(endpoint=f"{endpoint}/v1/traces", headers=headers)
 
 _STATE_DIR = os.path.expanduser("~/.cache/claude-hooks")
 

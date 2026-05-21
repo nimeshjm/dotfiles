@@ -45,5 +45,5 @@ emit_span(
     "claude_code.user_prompt",
     attrs,
     start_time_ns=now,
-    end_time_ns=now,
+    end_time_ns=now + 1_000_000,
 )

@@ -59,6 +59,8 @@ The board definition lives in `PANELS` in `install.py`. To create it, use Claude
 
 Claude will read `install.py`, run each query against your `claude-code` dataset, and create the board via MCP — no management key required, only your ingest key.
 
+**Note:** Time-series panels (Sessions Started, Tool Calls, Token Usage, etc.) use **bar charts** for better discrete-time visualization. Category breakdowns use tables.
+
 ## Architecture
 
 ### Event Flow

@@ -72,39 +72,42 @@ def merge_settings():
 #    the PANELS definition in install.py"
 # Claude will read this file, run each query via the Honeycomb MCP, and
 # create the board — no management key required.
+#
+# Time-series panels use bar charts for better discrete-time visualization.
+# Table panels show category breakdowns with counts and aggregates.
 # ---------------------------------------------------------------------------
 
 PANELS = [
     # Row 0 (y=0, h=6): Activity counts
     {"name": "Sessions Started",             "desc": "Count of new sessions",
-     "style": "graph", "x": 0,  "y": 0,  "w": 4,  "h": 6,
+     "chart_type": "bar", "x": 0,  "y": 0,  "w": 4,  "h": 6,
      "spec": {"calculations": [{"op": "COUNT"}],
               "filters": [{"column": "name", "op": "=", "value": "claude_code.session.start"}],
               "time_range": 86400}},
     {"name": "Tool Calls",                   "desc": "Total tool invocations",
-     "style": "graph", "x": 4,  "y": 0,  "w": 4,  "h": 6,
+     "chart_type": "bar", "x": 4,  "y": 0,  "w": 4,  "h": 6,
      "spec": {"calculations": [{"op": "COUNT"}],
               "filters": [{"column": "name", "op": "=", "value": "claude_code.tool"}],
               "time_range": 86400}},
     {"name": "User Prompts",                 "desc": "Total prompts submitted",
-     "style": "graph", "x": 8,  "y": 0,  "w": 4,  "h": 6,
+     "chart_type": "bar", "x": 8,  "y": 0,  "w": 4,  "h": 6,
      "spec": {"calculations": [{"op": "COUNT"}],
               "filters": [{"column": "name", "op": "=", "value": "claude_code.user_prompt"}],
               "time_range": 86400}},
     # Row 6 (y=6, h=6): Session health + model usage
     {"name": "Session Duration (avg + p95)", "desc": "How long sessions last in ms",
-     "style": "graph", "x": 0,  "y": 6,  "w": 4,  "h": 6,
+     "chart_type": "bar", "x": 0,  "y": 6,  "w": 4,  "h": 6,
      "spec": {"calculations": [{"op": "AVG", "column": "session.duration_ms"},
                                 {"op": "P95", "column": "session.duration_ms"}],
               "filters": [{"column": "name", "op": "=", "value": "claude_code.session.end"}],
               "time_range": 86400}},
     {"name": "Cache Hit Ratio",              "desc": "Average prompt-cache hit rate per turn",
-     "style": "graph", "x": 4,  "y": 6,  "w": 4,  "h": 6,
+     "chart_type": "bar", "x": 4,  "y": 6,  "w": 4,  "h": 6,
      "spec": {"calculations": [{"op": "AVG", "column": "gen_ai.usage.cache_hit_ratio"}],
               "filters": [{"column": "name", "op": "=", "value": "claude_code.turn.stop"}],
               "time_range": 86400}},
     {"name": "Model Usage",                  "desc": "Turns by model over time",
-     "style": "graph", "x": 8,  "y": 6,  "w": 4,  "h": 6,
+     "chart_type": "bar", "x": 8,  "y": 6,  "w": 4,  "h": 6,
      "spec": {"calculations": [{"op": "COUNT"}],
               "filters": [{"column": "name", "op": "=", "value": "claude_code.turn.stop"}],
               "breakdowns": ["gen_ai.request.model"],
@@ -112,15 +115,15 @@ PANELS = [
               "limit": 10, "time_range": 86400}},
     # Row 12 (y=12, h=6): Token usage trend (full width)
     {"name": "Token Usage",                  "desc": "Input, cache-read, and output tokens over time",
-     "style": "graph", "x": 0,  "y": 12, "w": 12, "h": 6,
+     "chart_type": "bar", "x": 0,  "y": 12, "w": 12, "h": 6,
      "spec": {"calculations": [{"op": "SUM", "column": "gen_ai.usage.input_tokens"},
                                 {"op": "SUM", "column": "gen_ai.usage.cache_read_tokens"},
                                 {"op": "SUM", "column": "gen_ai.usage.output_tokens"}],
               "filters": [{"column": "name", "op": "=", "value": "claude_code.turn.stop"}],
               "time_range": 86400}},
-    # Row 18 (y=18, h=8): Tool failures
+    # Row 18 (y=18, h=5): Tool failures and permission denials (side by side)
     {"name": "Tool Failures",                "desc": "Failed tool call count by tool name",
-     "style": "table", "x": 0,  "y": 18, "w": 12, "h": 8,
+     "style": "table", "x": 0,  "y": 18, "w": 6,  "h": 5,
      "spec": {"calculations": [{"op": "COUNT"}],
               "filters": [{"column": "name", "op": "=", "value": "claude_code.tool"},
                           {"column": "gen_ai.tool.success", "op": "=", "value": False}],
@@ -182,9 +185,8 @@ PANELS = [
      "spec": {"calculations": [{"op": "COUNT"}, {"op": "SUM", "column": "context.tokens_saved"}],
               "filters": [{"column": "name", "op": "=", "value": "claude_code.context.compact"}],
               "time_range": 86400}},
-    # Row 48 (y=48, h=8): Permission denials
     {"name": "Permission Denials",           "desc": "Auto-mode permission denials by tool",
-     "style": "table", "x": 0,  "y": 48, "w": 12, "h": 8,
+     "style": "table", "x": 6,  "y": 18, "w": 6,  "h": 5,
      "spec": {"calculations": [{"op": "COUNT"}],
               "filters": [{"column": "name", "op": "=", "value": "claude_code.permission.denied"}],
               "breakdowns": ["gen_ai.tool.name"],
@@ -205,6 +207,12 @@ def main():
     print("To create the Honeycomb dashboard, open Claude Code in this repo and prompt:")
     print('  "Create a Honeycomb board called \'Claude Code Sessions\' based on')
     print('   the PANELS definition in install.py"')
+    print()
+    print("Board features:")
+    print("  • Time-series panels use bar charts for discrete-time visualization")
+    print("  • Activity metrics: sessions, tool calls, user prompts")
+    print("  • Performance: latency, cache hit ratio, token usage")
+    print("  • Category breakdowns: by model, tool, session, stop reason")
     print()
     print("Requires the Honeycomb MCP server configured in Claude Code.")
 

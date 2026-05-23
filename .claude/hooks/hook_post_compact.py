@@ -9,9 +9,9 @@ stdin fields:
   trigger: "manual" | "auto"
   context_size_tokens (tokens after compaction)
 """
-import sys, os, time, json, tempfile
-sys.path.insert(0, os.path.expanduser(os.path.dirname(os.path.abspath(__file__))))
-from otel_span import read_stdin, emit_span
+import sys, os, time, json
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from otel_span import read_stdin, emit_span, _state_path
 
 data       = read_stdin()
 now        = time.time_ns()
@@ -21,7 +21,7 @@ tokens_after = data.get("context_size_tokens", 0)
 start_ns    = now
 tokens_before = 0
 
-ts_file = os.path.join(tempfile.gettempdir(), f"claude_compact_{session_id}.pre")
+ts_file = _state_path(f"claude_compact_{session_id}.pre")
 if os.path.exists(ts_file):
     try:
         with open(ts_file) as f:

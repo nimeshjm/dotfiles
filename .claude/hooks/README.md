@@ -7,7 +7,7 @@ via shell-command hooks. Covers every meaningful hook event the CLI exposes.
 
 | Dimension | How | Honeycomb derivation |
 |---|---|---|
-| **Session length** | `session.start` + `session.end` spans linked by `session.id` | `MAX(timestamp) - MIN(timestamp) GROUP BY session.id` |
+| **Session length** | `session.duration_ms` on each `session.end` span (computed from start-time state file) | `MAX(session.duration_ms) GROUP BY session.id` |
 | **Cost per session** | `gen_ai.request.model` + token counts on every `turn.stop` span | `SUM(input_tokens * price_in) + SUM(output_tokens * price_out) GROUP BY session.id, gen_ai.request.model` |
 | **Cache effectiveness** | `gen_ai.usage.cache_hit_ratio` pre-computed on each stop span | `AVG(gen_ai.usage.cache_hit_ratio) GROUP BY gen_ai.request.model` |
 | **Prompt effectiveness** | `turn.id` links every tool span and the stop span back to the originating prompt | `COUNT(tool spans) GROUP BY turn.id` — tool calls per prompt; filter by `gen_ai.tool.success=false` to find failing turns |
@@ -15,16 +15,46 @@ via shell-command hooks. Covers every meaningful hook event the CLI exposes.
 ## Install
 
 ```bash
-# 1. Copy the .claude/ folder into your project root (or ~/.claude/ for global)
-cp -r .claude/ /your/project/.claude/
+# 1. Run the installer (copies hooks, merges settings.json)
+cd dotfiles/.claude
+python3 install.py
 
 # 2. Install OTel Python packages (once per machine)
 pip install opentelemetry-sdk opentelemetry-exporter-otlp-proto-http
 
-# 3. Edit .claude/settings.json
-#    Replace YOUR_API_KEY with your Honeycomb ingest key.
-#    Or swap OTEL_EXPORTER_OTLP_ENDPOINT for any OTLP backend.
+# 3. Set OTEL env vars in your shell profile (~/.zshrc, ~/.bashrc, etc.)
+export OTEL_EXPORTER_OTLP_ENDPOINT="https://api.honeycomb.io"
+export OTEL_EXPORTER_OTLP_HEADERS="x-honeycomb-team=YOUR_INGEST_KEY"
+# Then restart your shell or source the profile
 ```
+
+### API keys
+
+Two separate Honeycomb keys are used, with different scopes:
+
+| Key | Purpose | Where used |
+|-----|---------|------------|
+| **Ingest key** (`hcaik_…`) | Send spans to Honeycomb | `OTEL_EXPORTER_OTLP_HEADERS` env var in shell profile |
+| **Configuration key** | Create boards and queries via the Management API | `HONEYCOMB_CONFIG_KEY` env var at install time |
+
+**Getting an ingest key**: Honeycomb UI → *Team Settings* → *API Keys* → *Create Ingest Key*.
+
+**Getting a configuration key**: Honeycomb UI → *Team Settings* → *API Keys* → *Create API Key*.
+Under *Permissions*, enable at minimum: **Events**, **Boards**. Queries permission is not required — `install.sh` uses the board-creation path, which handles query creation internally.
+
+### Creating the Honeycomb board
+
+The board can be created manually via Claude Code with the Honeycomb MCP server configured. See the main [README.md](../README.md#creating-the-honeycomb-dashboard) for instructions.
+
+Alternatively, if you have a Honeycomb configuration key, you can use the MCP server directly:
+
+```bash
+# With Claude Code and Honeycomb MCP configured:
+# Prompt: "Create a Honeycomb board called 'Claude Code Sessions' based on
+#          the PANELS definition in install.py"
+```
+
+The board creation is idempotent — it skips silently if a board named *Claude Code Sessions* already exists.
 
 ## Spans emitted
 
@@ -51,57 +81,180 @@ pip install opentelemetry-sdk opentelemetry-exporter-otlp-proto-http
 
 Every span also receives `session.id`, `cwd`, `git.repo`, and `git.origin` from the shared emitter.
 
+> **Note on `git.*` attributes**: only SSH-shaped remotes (`git@host:org/repo.git`) populate
+> `git.origin` and `git.repo`. Repos using HTTPS remotes will show empty `git.*` attributes
+> by design — HTTPS URLs may contain embedded credentials and are never exported to spans.
+
 **Disabled hooks** (files kept, wiring removed from settings.json):
 - `CwdChanged` — redundant; `cwd` is already on every tool span
 - `PostToolBatch` — reconstructable in Honeycomb by grouping tool spans on `session.id + time`
-- `PreToolUse` — still runs to write the start-time tempfile, but emits no span
+- `PreToolUse` — still runs to write the start-time state file, but emits no span
 
 ## Derived metrics (copy-paste Honeycomb queries)
 
-**Session duration** (while session-as-root-span is not yet implemented):
-```
-WHERE name = "claude_code.session.start" OR name = "claude_code.session.end"
-| GROUP BY session.id
-| MAX(timestamp) - MIN(timestamp) AS session_duration_ms
+Paste any of these into the Honeycomb query builder: **New Query → `{ }` JSON icon → paste**. Adjust `time_range` (seconds) as needed: `86400` = 24h, `604800` = 7d.
+
+**Session duration**:
+```json
+{
+  "time_range": 86400,
+  "calculations": [
+    {"op": "MAX", "column": "session.duration_ms"}
+  ],
+  "filters": [
+    {"column": "name", "op": "=", "value": "claude_code.session.end"}
+  ],
+  "filter_combination": "AND",
+  "breakdowns": ["session.id"],
+  "orders": [{"op": "MAX", "column": "session.duration_ms", "order": "descending"}],
+  "limit": 100
+}
 ```
 
 **Cost per session** (substitute model prices):
-```
-WHERE name = "claude_code.turn.stop"
-| GROUP BY session.id, gen_ai.request.model
-| SUM(gen_ai.usage.input_tokens) AS total_input
-| SUM(gen_ai.usage.output_tokens) AS total_output
-| SUM(gen_ai.usage.cache_read_tokens) AS total_cache_read
+```json
+{
+  "time_range": 86400,
+  "calculations": [
+    {"op": "SUM", "column": "gen_ai.usage.input_tokens"},
+    {"op": "SUM", "column": "gen_ai.usage.output_tokens"},
+    {"op": "SUM", "column": "gen_ai.usage.cache_read_tokens"}
+  ],
+  "filters": [
+    {"column": "name", "op": "=", "value": "claude_code.turn.stop"}
+  ],
+  "filter_combination": "AND",
+  "breakdowns": ["session.id", "gen_ai.request.model"],
+  "orders": [{"op": "SUM", "column": "gen_ai.usage.input_tokens", "order": "descending"}],
+  "limit": 100
+}
 ```
 
 **Cache hit ratio over time**:
-```
-WHERE name = "claude_code.turn.stop"
-| HEATMAP(gen_ai.usage.cache_hit_ratio)
+```json
+{
+  "time_range": 86400,
+  "calculations": [
+    {"op": "HEATMAP", "column": "gen_ai.usage.cache_hit_ratio"}
+  ],
+  "filters": [
+    {"column": "name", "op": "=", "value": "claude_code.turn.stop"}
+  ],
+  "filter_combination": "AND",
+  "limit": 10
+}
 ```
 
 **Tool calls per prompt** (requires `turn.id`):
-```
-WHERE name = "claude_code.tool"
-| GROUP BY turn.id, session.id
-| COUNT() AS tools_per_prompt
-| P90(tools_per_prompt)
+```json
+{
+  "time_range": 86400,
+  "calculations": [
+    {"op": "COUNT"}
+  ],
+  "filters": [
+    {"column": "name", "op": "=", "value": "claude_code.tool"}
+  ],
+  "filter_combination": "AND",
+  "breakdowns": ["turn.id", "session.id"],
+  "orders": [{"op": "COUNT", "order": "descending"}],
+  "limit": 100
+}
 ```
 
 **Permission friction** (avg decision latency by tool):
-```
-WHERE name = "claude_code.permission.denied"
-| GROUP BY gen_ai.tool.name
-| AVG(permission.decision_ms) AS avg_decision_ms
-| COUNT() AS denial_count
+```json
+{
+  "time_range": 86400,
+  "calculations": [
+    {"op": "AVG", "column": "permission.decision_ms"},
+    {"op": "COUNT"}
+  ],
+  "filters": [
+    {"column": "name", "op": "=", "value": "claude_code.permission.denied"}
+  ],
+  "filter_combination": "AND",
+  "breakdowns": ["gen_ai.tool.name"],
+  "orders": [{"op": "AVG", "column": "permission.decision_ms", "order": "descending"}],
+  "limit": 25
+}
 ```
 
 **Lines of code written per session**:
+```json
+{
+  "time_range": 86400,
+  "calculations": [
+    {"op": "SUM", "column": "edit.lines_added"},
+    {"op": "SUM", "column": "edit.lines_removed"}
+  ],
+  "filters": [
+    {"column": "name", "op": "=", "value": "claude_code.tool"},
+    {"column": "gen_ai.tool.name", "op": "=", "value": "Edit"}
+  ],
+  "filter_combination": "AND",
+  "breakdowns": ["session.id"],
+  "orders": [{"op": "SUM", "column": "edit.lines_added", "order": "descending"}],
+  "limit": 100
+}
 ```
-WHERE name = "claude_code.tool" AND gen_ai.tool.name = "Edit"
-| GROUP BY session.id
-| SUM(edit.lines_added) AS lines_added
-| SUM(edit.lines_removed) AS lines_removed
+
+## Honeycomb board
+
+`install.py` creates a pre-built **Claude Code Sessions** board in the `claude` environment with 16 panels arranged in logical groups:
+
+**Row 1 — Activity counts** (bar charts)
+
+| Panel | Query | Display |
+|-------|-------|---------|
+| Sessions Started | `COUNT` of `claude_code.session.start` | Bar chart |
+| Tool Calls | `COUNT` of `claude_code.tool` | Bar chart |
+| User Prompts | `COUNT` of `claude_code.user_prompt` | Bar chart |
+
+**Row 2 — Session health** (bar charts)
+
+| Panel | Query | Display |
+|-------|-------|---------|
+| Session Duration (avg + p95) | `AVG` + `P95` of `session.duration_ms` on `claude_code.session.end` | Bar chart |
+| Cache Hit Ratio | `AVG(gen_ai.usage.cache_hit_ratio)` on `claude_code.turn.stop` | Bar chart |
+| Model Usage | `COUNT` of `claude_code.turn.stop`, breakdown by `gen_ai.request.model` | Bar chart |
+
+**Row 3 — Token usage** (full-width bar chart)
+
+| Panel | Query | Display |
+|-------|-------|---------|
+| Token Usage | `SUM(input_tokens)` + `SUM(cache_read_tokens)` + `SUM(output_tokens)` on `claude_code.turn.stop` | Bar chart |
+
+**Rows 4–6 — Tool and session tables**
+
+| Panel | Query | Display |
+|-------|-------|---------|
+| Tool Failure Rate % | `failed / total * 100` formula, breakdown by `gen_ai.tool.name` | Table |
+| Tool Duration (avg + p95) | `AVG` + `P95` of `tool.duration_ms`, breakdown by `gen_ai.tool.name` | Table |
+| Lines Edited per Session | `SUM(edit.lines_added)` + `SUM(edit.lines_removed)`, breakdown by `session.id` | Table |
+| Prompts per Session | `COUNT` of `claude_code.user_prompt`, breakdown by `session.id` | Table |
+| Tokens per Session | `SUM` of input + cache + output tokens, breakdown by `session.id` | Table |
+
+**Row 7 — Diagnostics**
+
+| Panel | Query | Display |
+|-------|-------|---------|
+| Stop Reason Distribution | `COUNT` of `claude_code.turn.stop`, breakdown by `agent.stop_reason` | Table |
+| Subagent Activity | `COUNT` + `AVG(agent.duration_ms)` of `claude_code.subagent`, breakdown by `agent.type` | Table |
+| Context Compaction | `COUNT` + `SUM(context.tokens_saved)` of `claude_code.context.compact` | Table |
+
+**Row 8 — Permissions**
+
+| Panel | Query | Display |
+|-------|-------|---------|
+| Permission Denials | `COUNT` of `claude_code.permission.denied`, breakdown by `gen_ai.tool.name` | Table |
+
+All panels default to the last 24 h. The board time window can be changed interactively in the Honeycomb UI without affecting the saved queries.
+
+To recreate the board after deleting it, open Claude Code with the Honeycomb MCP server configured and prompt:
+
+```
+"Create a Honeycomb board called 'Claude Code Sessions' based on the PANELS definition in install.py"
 ```
 
 ## Opt-in content capture
@@ -144,9 +297,11 @@ Use absolute paths in the command fields instead of `${CLAUDE_PROJECT_DIR}`.
 - **SDK init overhead**: Each hook is a short-lived Python process that instantiates a new
   `TracerProvider` and `SimpleSpanProcessor` on every call (~100–300ms). For high-frequency
   tool use sessions, PreToolUse + PostToolUse together add ~200–600ms of latency per tool call.
-- **Tempfile leaks**: Start-time state is coordinated via `/tmp/claude_hook_*`,
-  `/tmp/claude_perm_*`, `/tmp/claude_turn_*`, and `/tmp/claude_compact_*` files. If a hook
-  crashes mid-turn, these files are not cleaned up. They are small and harmless but accumulate.
+- **State file leaks**: Start-time state is coordinated via `~/.cache/claude-hooks/` (files
+  named `claude_hook_*`, `claude_perm_*`, `claude_turn_*`, `claude_compact_*`). The directory
+  is created with mode `0700`; files are written with `O_NOFOLLOW` to resist symlink attacks.
+  If a hook crashes mid-turn, orphaned files are not cleaned up — they are small and harmless
+  but accumulate over time.
 - **OTLP protocol mismatch**: `settings.json` sets `OTEL_EXPORTER_OTLP_PROTOCOL=grpc` but the
   hooks import `opentelemetry.exporter.otlp.proto.http.trace_exporter` (HTTP/protobuf). The env
   var is ignored; all spans use HTTP/protobuf regardless.
@@ -158,13 +313,14 @@ Use absolute paths in the command fields instead of `${CLAUDE_PROJECT_DIR}`.
 
 ```
 .claude/
+├── install.py                 ← copies hooks, merges settings.json
 ├── settings.json              ← hook wiring + OTel env vars
 └── hooks/
     ├── otel_span.py           ← shared OTLP emitter (imported by all hooks)
     ├── hook_session_start.py
     ├── hook_session_end.py
     ├── hook_user_prompt_submit.py
-    ├── hook_pre_tool_use.py   ← writes start-time tempfile only; no span
+    ├── hook_pre_tool_use.py   ← writes start-time state file only; no span
     ├── hook_post_tool_use.py
     ├── hook_post_tool_use_failure.py
     ├── hook_stop.py
@@ -177,5 +333,7 @@ Use absolute paths in the command fields instead of `${CLAUDE_PROJECT_DIR}`.
     ├── hook_permission_denied.py
     ├── hook_notification.py   ← emits only for permission_prompt and idle_prompt
     ├── hook_cwd_changed.py    ← disabled in settings.json
-    └── hook_post_tool_batch.py ← disabled in settings.json
+    ├── hook_post_tool_batch.py ← disabled in settings.json
+    └── dev/
+        └── dump_env.py        ← dev tool: dump subprocess env vars (not a configured hook)
 ```

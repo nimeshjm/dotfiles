@@ -7,9 +7,9 @@ stdin fields:
   session_id, cwd, hook_event_name
   tool_name, tool_use_id, tool_input, error, duration_ms
 """
-import sys, os, time, json, tempfile
-sys.path.insert(0, os.path.expanduser(os.path.dirname(os.path.abspath(__file__))))
-from otel_span import read_stdin, emit_span
+import sys, os, time, json
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from otel_span import read_stdin, emit_span, _state_path
 
 data        = read_stdin()
 now         = time.time_ns()
@@ -19,7 +19,7 @@ session_id  = data.get("session_id", "")
 error       = str(data.get("error", "unknown error"))
 
 start_ns = now
-start_file = os.path.join(tempfile.gettempdir(), f"claude_hook_{session_id}_{tool_use_id}.start")
+start_file = _state_path(f"claude_hook_{session_id}_{tool_use_id}.start")
 if os.path.exists(start_file):
     try:
         with open(start_file) as f:
@@ -30,7 +30,7 @@ if os.path.exists(start_file):
 
 # Read turn_id if available
 turn_id   = ""
-turn_file = os.path.join(tempfile.gettempdir(), f"claude_turn_{session_id}.id")
+turn_file = _state_path(f"claude_turn_{session_id}.id")
 if os.path.exists(turn_file):
     try:
         with open(turn_file) as f:

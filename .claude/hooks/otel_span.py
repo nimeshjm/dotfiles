@@ -18,7 +18,7 @@ import sys
 import time
 import json
 import subprocess
-from typing import Any
+from typing import IO, Any
 
 # ── OTel imports ──────────────────────────────────────────────────────────────
 try:
@@ -36,17 +36,57 @@ except ImportError:
 def _get_exporter() -> "OTLPSpanExporter | None":
     if not _OTEL_AVAILABLE:
         return None
-    if not os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", ""):
+    endpoint = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", "").rstrip("/")
+    if not endpoint:
         return None
-    # Let the SDK read endpoint/headers from env vars — it correctly appends /v1/traces
-    return OTLPSpanExporter()
+    headers_raw = os.environ.get("OTEL_EXPORTER_OTLP_HEADERS", "")
+    headers = dict(
+        kv.split("=", 1) for kv in headers_raw.split(",") if "=" in kv
+    )
+    return OTLPSpanExporter(endpoint=f"{endpoint}/v1/traces", headers=headers)
+
+_STATE_DIR = os.path.expanduser("~/.cache/claude-hooks")
+
+
+def _state_path(name: str) -> str:
+    """Return the full path for a named state file in the per-user state dir."""
+    return os.path.join(_STATE_DIR, name)
+
+
+def _open_state_file(name: str) -> "IO[str]":
+    """Open a state file for writing, safely against symlink pre-creation attacks.
+
+    Uses O_NOFOLLOW so a pre-created symlink at the target path is refused
+    rather than followed to an arbitrary destination.
+    """
+    os.makedirs(_STATE_DIR, mode=0o700, exist_ok=True)
+    path = _state_path(name)
+    flags = os.O_CREAT | os.O_WRONLY | os.O_TRUNC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(path, flags, 0o600)
+    return os.fdopen(fd, "w")
+
+
+def _is_ssh_remote(url: str) -> bool:
+    """Return True only for SSH-shaped remotes (git@host:org/repo.git).
+
+    HTTPS and other URL-scheme remotes may embed credentials in the URL, so we
+    refuse to export them rather than risk a partial leak after redaction.
+    """
+    if "://" in url:
+        return False
+    at = url.find("@")
+    colon = url.find(":")
+    return 0 < at < colon
+
 
 def get_git_context(cwd: str = "") -> dict[str, str]:
     """
-    Returns git repo name and remote origin URL for the given working directory.
-    Falls back to empty strings if git isn't available or cwd isn't a repo.
+    Returns git repo name and remote origin for the given working directory.
+    Only emits attributes for SSH-shaped remotes; HTTPS and other origins are
+    dropped entirely to prevent credential exfiltration via span attributes.
     """
-    git_attrs: dict[str, str] = {}
     run_dir = cwd or os.getcwd()
 
     try:
@@ -56,20 +96,18 @@ def get_git_context(cwd: str = "") -> dict[str, str]:
             stderr=subprocess.DEVNULL,
             timeout=2,
         ).decode().strip()
-        git_attrs["git.origin"] = origin
-
-        # Derive a clean repo name from the URL
-        # handles both https://github.com/org/repo.git and git@github.com:org/repo.git
-        repo_name = origin.rstrip("/")
-        if repo_name.endswith(".git"):
-            repo_name = repo_name[:-4]
-        repo_name = repo_name.split("/")[-1].split(":")[-1]
-        git_attrs["git.repo"] = repo_name
-
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
-        pass
+        return {}
 
-    return git_attrs
+    if not _is_ssh_remote(origin):
+        return {}
+
+    repo_name = origin.rstrip("/")
+    if repo_name.endswith(".git"):
+        repo_name = repo_name[:-4]
+    repo_name = repo_name.split(":")[-1].split("/")[-1]
+
+    return {"git.origin": origin, "git.repo": repo_name}
 
 def emit_span(
     name: str,
@@ -93,7 +131,7 @@ def emit_span(
     if exporter is None:
         return
 
-    service_name = os.environ.get("OTEL_SERVICE_NAME", "claude-code-interactive")
+    service_name = os.environ.get("OTEL_SERVICE_NAME", "claude-code")
     resource = Resource.create({
         "service.name": service_name,
         "gen_ai.system": "anthropic",
@@ -137,6 +175,7 @@ def read_stdin() -> dict[str, Any]:
     try:
         return json.load(sys.stdin)
     except json.JSONDecodeError:
+        print("[otel_span] stdin was not valid JSON; emitting empty-attrs span", file=sys.stderr)
         return {}
 
 

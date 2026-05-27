@@ -1,6 +1,10 @@
 # Claude Code Telemetry & Observability
 
-A comprehensive OpenTelemetry instrumentation suite for Claude Code, providing session-level telemetry (tokens, models, tool usage, performance) streamed to Honeycomb for observability dashboards and analysis.
+A comprehensive OpenTelemetry instrumentation suite for Claude Code, providing session-level telemetry (tokens, models, tool usage, performance) streamed to an observability backend for dashboards and analysis.
+
+Supports two backends:
+- **[Honeycomb](https://honeycomb.io)** — cloud SaaS, no infrastructure required
+- **[SigNoz](https://signoz.io)** — self-hosted, runs locally via Docker
 
 ## Installation
 
@@ -8,9 +12,11 @@ A comprehensive OpenTelemetry instrumentation suite for Claude Code, providing s
 
 - Claude Code (CLI or desktop)
 - Python 3.11+
-- Honeycomb account with API key (ingest key, not management key)
+- One of:
+  - **Honeycomb**: account with ingest API key (not management key)
+  - **SigNoz**: running instance (default: `http://localhost:8080`) with an API key
 
-### Quick Start
+### Quick Start — Honeycomb
 
 1. **Clone or copy this repo** to `~/.claude`:
    ```bash
@@ -37,19 +43,65 @@ A comprehensive OpenTelemetry instrumentation suite for Claude Code, providing s
    - Navigate to the `claude-code` dataset
    - Run a Claude Code session and watch spans arrive in real-time
 
+### Quick Start — SigNoz
+
+1. **Clone or copy this repo** to `~/.claude`:
+   ```bash
+   git clone https://github.com/nmanmohanlal/dotfiles.git ~/.claude
+   ```
+
+2. **Run the installer** with your SigNoz URL and API key:
+   ```bash
+   SIGNOZ_API_KEY=your-api-key python3 ~/.claude/install.py \
+     --backend signoz \
+     --signoz-url http://localhost:8080
+   ```
+   This will:
+   - Copy hooks into `~/.claude/hooks/`
+   - Merge settings into `~/.claude/settings.json` (OTLP endpoint set to `http://localhost:4318`)
+   - **Create the "Claude Code Sessions" dashboard automatically** via the SigNoz API
+   - Print a direct URL to open the dashboard
+
+3. **Open the printed dashboard URL** — e.g.:
+   ```
+   http://localhost:8080/dashboard/DASHBOARD_ID?relativeTime=1d
+   ```
+   Opening it once stamps the 1-day default time range in your browser.
+
 ### Configuration
 
 **Environment Variables** (set in `settings.json` under `env`):
 
 - `CLAUDE_CODE_ENABLE_TELEMETRY=1` — Enable telemetry (required)
 - `CLAUDE_CODE_ENHANCED_TELEMETRY_BETA=1` — Enable enhanced metrics
-- `OTEL_EXPORTER_OTLP_ENDPOINT=https://api.honeycomb.io` — Honeycomb endpoint
-- `OTEL_EXPORTER_OTLP_HEADERS=x-honeycomb-team=YOUR_KEY` — Ingest key
+- `OTEL_EXPORTER_OTLP_ENDPOINT` — Backend OTLP endpoint:
+  - Honeycomb: `https://api.honeycomb.io`
+  - SigNoz: `http://localhost:4318`
+- `OTEL_EXPORTER_OTLP_HEADERS=x-honeycomb-team=YOUR_KEY` — Honeycomb ingest key
 - `OTEL_LOG_USER_PROMPTS=0` — Don't log user input (privacy)
 - `OTEL_LOG_TOOL_DETAILS=0` — Don't log tool parameters
 - `OTEL_LOG_TOOL_CONTENT=0` — Don't log tool output
 
-## Creating the Honeycomb Dashboard
+**SigNoz installer flags** (`install.py --backend signoz`):
+
+| Flag | Env var | Default | Description |
+|------|---------|---------|-------------|
+| `--signoz-url URL` | — | `http://localhost:8080` | SigNoz UI + API base URL |
+| `--signoz-api-key KEY` | `SIGNOZ_API_KEY` | — | API key for dashboard creation |
+
+## Creating the Dashboard
+
+### SigNoz — automatic
+
+The installer creates the dashboard automatically:
+```bash
+SIGNOZ_API_KEY=your-key python3 ~/.claude/install.py --backend signoz
+```
+A 16-panel "Claude Code Sessions" dashboard is created via the SigNoz API and the URL is printed. Re-running the installer will create a fresh copy (delete the old one first if desired).
+
+The dashboard JSON is also saved to `~/.claude/signoz_dashboard.json` for manual import via **Dashboards → New Dashboard → Import JSON**.
+
+### Honeycomb — via MCP
 
 The board definition lives in `PANELS` in `install.py`. To create it, use Claude Code with the [Honeycomb MCP server](https://docs.honeycomb.io/honeycomb-mcp/) configured:
 
@@ -96,8 +148,8 @@ SessionEnd → hook_session_end.py → emit_span("claude_code.session.end")
 
 **`otel_span.py`** is the shared instrumentation library:
 - Accepts span name and attributes dictionary
-- Coerces all non-primitive values to JSON strings (for compatibility with Honeycomb string columns)
-- Exports via HTTP to `OTEL_EXPORTER_OTLP_ENDPOINT` using the OTLP gRPC wire protocol
+- Coerces all non-primitive values to JSON strings (for compatibility with backend string columns)
+- Exports via HTTP to `OTEL_EXPORTER_OTLP_ENDPOINT` using the OTLP HTTP protocol
 - Handles retries and timeout (5s default)
 
 **Span Attributes** are automatically enriched:
@@ -202,7 +254,7 @@ Pre-tool hook writes turn_id to cache file. Post-tool hook reads it to correlate
 3. **Test**:
    - Trigger the event in Claude Code
    - Check `~/.cache/claude-hooks/` for any logs
-   - Verify span appears in Honeycomb within 10 seconds
+   - Verify span appears in your backend (Honeycomb/SigNoz) within 10 seconds
 
 ### Common Patterns
 
@@ -265,7 +317,40 @@ cat ~/.cache/claude-hooks/hook_stop.log  # Last session's diagnostics
 echo '{"session_id": "test"}' | python3 ~/.claude/hooks/hook_session_start.py
 ```
 
-### Sparse data in Honeycomb dashboard
+### No spans arriving in SigNoz
+
+**Check 1: Verify SigNoz is running**
+```bash
+curl http://localhost:8080/api/v1/health
+# Should return {"status":"ok"}
+```
+
+**Check 2: Verify OTLP endpoint in settings**
+```bash
+grep "OTEL_EXPORTER_OTLP_ENDPOINT" ~/.claude/settings.json
+# Should show: http://localhost:4318
+```
+
+**Check 3: Test OTLP port is reachable**
+```bash
+curl -s http://localhost:4318  # Should not get "connection refused"
+```
+
+### SigNoz dashboard not created
+
+If `install.py` exits without printing a dashboard URL, the API call failed. Check:
+```bash
+# Test API key manually
+curl -H "SIGNOZ-API-KEY: your-key" http://localhost:8080/api/v1/dashboards
+# Should return JSON with "status":"success"
+```
+
+Re-run with the key set:
+```bash
+SIGNOZ_API_KEY=your-key python3 ~/.claude/install.py --backend signoz
+```
+
+### Sparse data in Honeycomb/SigNoz dashboard
 
 - **Missing tokens**: `hook_stop.py` reads transcript to extract model/tokens. Ensure session transcript exists at the path provided.
 - **Empty stop_reason**: Stop hook didn't receive the payload; check that Claude Code is invoking the hook.

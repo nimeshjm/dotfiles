@@ -17,16 +17,46 @@ via shell-command hooks. Covers every meaningful hook event the CLI exposes.
 ```bash
 # 1. Run the installer (copies hooks, merges settings.json)
 cd dotfiles/.claude
-python3 install.py
+python3 install.py                     # Honeycomb (default)
+python3 install.py --backend signoz    # SigNoz self-hosted
 
 # 2. Install OTel Python packages (once per machine)
 pip install opentelemetry-sdk opentelemetry-exporter-otlp-proto-http
-
-# 3. Set OTEL env vars in your shell profile (~/.zshrc, ~/.bashrc, etc.)
-export OTEL_EXPORTER_OTLP_ENDPOINT="https://api.honeycomb.io"
-export OTEL_EXPORTER_OTLP_HEADERS="x-honeycomb-team=YOUR_INGEST_KEY"
-# Then restart your shell or source the profile
 ```
+
+## Backend selection
+
+`install.py` supports two OTel backends, selected via `--backend`.
+
+### Honeycomb (default)
+
+```bash
+python3 install.py
+```
+
+- Sends spans to `https://api.honeycomb.io` via OTLP/HTTP.
+- Requires a Honeycomb ingest key (`hcaik_…`) — edit the `OTEL_EXPORTER_OTLP_HEADERS` placeholder in `~/.claude/settings.json` after install.
+- Writes rendered panel definitions to `~/.claude/honeycomb_panels.json`.
+- Board creation is done via the Honeycomb MCP (see §Creating the Honeycomb board below).
+
+### SigNoz (self-hosted)
+
+```bash
+python3 install.py --backend signoz
+# Optional: POST dashboard via API instead of manual import
+python3 install.py --backend signoz \
+    --signoz-url http://localhost:8080 \
+    --signoz-api-key YOUR_KEY
+```
+
+- Sends spans to `http://localhost:4318` (SigNoz self-hosted OTLP/HTTP receiver).
+  Change the endpoint by editing `OTEL_EXPORTER_OTLP_ENDPOINT` in `~/.claude/settings.json`.
+- No auth header required for self-hosted.
+- Writes `~/.claude/signoz_dashboard.json` with 16 pre-built widgets.
+- **Import the dashboard**: SigNoz UI → Dashboards → New Dashboard → Import JSON →
+  paste the contents of `~/.claude/signoz_dashboard.json`.
+- If `--signoz-api-key` is supplied, also POSTs the dashboard to the SigNoz API
+  (`/api/v1/dashboards`) — no manual import needed.
 
 ### API keys
 
@@ -44,17 +74,19 @@ Under *Permissions*, enable at minimum: **Events**, **Boards**. Queries permissi
 
 ### Creating the Honeycomb board
 
-The board can be created manually via Claude Code with the Honeycomb MCP server configured. See the main [README.md](../README.md#creating-the-honeycomb-dashboard) for instructions.
+After running `python3 install.py`, the file `~/.claude/honeycomb_panels.json` contains
+the 16 pre-built panel definitions in Honeycomb-native query format.
 
-Alternatively, if you have a Honeycomb configuration key, you can use the MCP server directly:
+Open Claude Code with the Honeycomb MCP server configured and prompt:
 
-```bash
-# With Claude Code and Honeycomb MCP configured:
-# Prompt: "Create a Honeycomb board called 'Claude Code Sessions' based on
-#          the PANELS definition in install.py"
+```
+"Create a Honeycomb board called 'Claude Code Sessions' using the
+ panel definitions in ~/.claude/honeycomb_panels.json"
 ```
 
-The board creation is idempotent — it skips silently if a board named *Claude Code Sessions* already exists.
+Claude reads the JSON, runs each query via the Honeycomb MCP, and creates the board —
+no management key required. Board creation is idempotent — it skips silently if a board
+named *Claude Code Sessions* already exists.
 
 ## Spans emitted
 
@@ -251,10 +283,12 @@ Paste any of these into the Honeycomb query builder: **New Query → `{ }` JSON 
 
 All panels default to the last 24 h. The board time window can be changed interactively in the Honeycomb UI without affecting the saved queries.
 
-To recreate the board after deleting it, open Claude Code with the Honeycomb MCP server configured and prompt:
+To recreate the board after deleting it, run `python3 .claude/install.py` first (to refresh
+`~/.claude/honeycomb_panels.json`), then open Claude Code with the Honeycomb MCP server and prompt:
 
 ```
-"Create a Honeycomb board called 'Claude Code Sessions' based on the PANELS definition in install.py"
+"Create a Honeycomb board called 'Claude Code Sessions' using the
+ panel definitions in ~/.claude/honeycomb_panels.json"
 ```
 
 ## Opt-in content capture

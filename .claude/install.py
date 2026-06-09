@@ -274,15 +274,16 @@ PANELS: list[dict[str, Any]] = [
         "name": "Tool Duration (avg + p95)",
         "desc": "Average and p95 tool execution time by tool type",
         "chart_type": "table",
+        "y_axis_unit": "ns",
         "layout": {"x": 0, "y": 26, "w": 6, "h": 8},
         "query": {
             "span_name": "claude_code.tool",
             "aggregations": [
-                {"op": "AVG", "field": "tool.duration_ms"},
-                {"op": "P95", "field": "tool.duration_ms"},
+                {"op": "AVG", "field": "duration_ms"},
+                {"op": "P95", "field": "duration_ms"},
             ],
             "breakdowns": ["gen_ai.tool.name"],
-            "orders": [{"op": "AVG", "field": "tool.duration_ms", "order": "descending"}],
+            "orders": [{"op": "AVG", "field": "duration_ms", "order": "descending"}],
             "limit": 20,
             "time_range": 86400,
         },
@@ -409,6 +410,61 @@ PANELS: list[dict[str, Any]] = [
             "time_range": 86400,
         },
     },
+    # ── Row 60 (y=60, h=6): Tokens per model ───────────────────────────────
+    {
+        "name": "Tokens per Model",
+        "desc": "Total input, cache-read, output, and cache-creation tokens broken down by model",
+        "chart_type": "table",
+        "y_axis_unit": "short",
+        "layout": {"x": 0, "y": 60, "w": 12, "h": 6},
+        "query": {
+            "span_name": "claude_code.turn.stop",
+            "aggregations": [
+                {"op": "SUM", "field": "gen_ai.usage.input_tokens"},
+                {"op": "SUM", "field": "gen_ai.usage.cache_read_tokens"},
+                {"op": "SUM", "field": "gen_ai.usage.output_tokens"},
+                {"op": "SUM", "field": "gen_ai.usage.cache_creation_tokens"},
+            ],
+            "breakdowns": ["gen_ai.request.model"],
+            "orders": [{"op": "SUM", "field": "gen_ai.usage.input_tokens", "order": "descending"}],
+            "limit": 20,
+            "time_range": 86400,
+        },
+    },
+    # ── Row 66 (y=66, h=6): Estimated cost per model ────────────────────────
+    {
+        "name": "Estimated Cost per Model (USD)",
+        "desc": (
+            "Approximate USD cost per model per token type. "
+            "Rates (verify at anthropic.com/pricing): "
+            "Sonnet $3/$15/$0.30/$3.75 per MTok input/output/cache-read/cache-creation; "
+            "Haiku $0.80/$4/$0.08/$1. "
+            "Formula uses Sonnet rates for all models — Haiku cost is overestimated ~3–4x. "
+            "New model slugs get cost=0 until rates are added."
+        ),
+        "chart_type": "table",
+        "decimal_precision": 4,
+        "layout": {"x": 0, "y": 66, "w": 12, "h": 6},
+        "query": {
+            "span_name": "claude_code.turn.stop",
+            "aggregations": [
+                {"op": "SUM", "field": "gen_ai.usage.input_tokens"},        # A
+                {"op": "SUM", "field": "gen_ai.usage.output_tokens"},       # B
+                {"op": "SUM", "field": "gen_ai.usage.cache_read_tokens"},   # C
+                {"op": "SUM", "field": "gen_ai.usage.cache_creation_tokens"},  # D
+            ],
+            # Sonnet-rate formula: $3/$15/$0.30/$3.75 per MTok
+            "formulas": [
+                {
+                    "expression": "A * 0.000003 + B * 0.000015 + C * 0.0000003 + D * 0.00000375",
+                    "legend": "total_cost_usd",
+                }
+            ],
+            "breakdowns": ["gen_ai.request.model"],
+            "limit": 20,
+            "time_range": 86400,
+        },
+    },
 ]
 
 
@@ -437,12 +493,18 @@ class HoneycombBackend:
 
     def _ir_to_hc_spec(self, query: dict) -> dict:
         """Translate a neutral query IR dict → Honeycomb query spec."""
-        # calculations: [{op, column?}]
+        has_formulas = bool(query.get("formulas"))
+        query_names = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+
+        # calculations: [{op, column?, name?}]
+        # Names are required when formulas are present (Honeycomb needs $name refs)
         calculations = []
-        for agg in query["aggregations"]:
+        for i, agg in enumerate(query["aggregations"]):
             entry: dict[str, Any] = {"op": agg["op"]}
             if "field" in agg:
                 entry["column"] = agg["field"]
+            if has_formulas:
+                entry["name"] = query_names[i]
             calculations.append(entry)
 
         # filters: span_name filter first, then extra filters
@@ -469,6 +531,13 @@ class HoneycombBackend:
             spec["orders"] = hc_orders
         if "limit" in query:
             spec["limit"] = query["limit"]
+        if has_formulas:
+            hc_formulas = []
+            for i, f in enumerate(query["formulas"]):
+                # Translate bare letter vars (A, B, C…) → Honeycomb $-prefixed names ($A, $B…)
+                expr = re.sub(r"\b([A-Z])\b", r"$\1", f["expression"])
+                hc_formulas.append({"expression": expr, "name": f.get("legend", f"F{i + 1}")})
+            spec["formulas"] = hc_formulas
         return spec
 
     def render_dashboard(self, panels: list[dict]) -> list[dict]:
@@ -515,6 +584,11 @@ _SZ_AGG_OP: dict[str, str] = {
     "SUM": "sum",
     "MAX": "max",
     "MIN": "min",
+}
+
+# IR field names that map to SigNoz built-in span fields (not custom attributes)
+_SZ_FIELD_MAP: dict[str, str] = {
+    "duration_ms": "duration_nano",
 }
 
 # SigNoz panel type mapping (IR chart_type → SigNoz panelTypes)
@@ -618,7 +692,7 @@ class SignozBackend:
         for i, agg in enumerate(aggs):
             qname = query_names[i]
             agg_op = _SZ_AGG_OP.get(agg["op"], "count")
-            agg_field = agg.get("field", "")
+            agg_field = _SZ_FIELD_MAP.get(agg.get("field", ""), agg.get("field", ""))
             agg_expr = f"{agg_op}({agg_field})" if agg_field else f"{agg_op}()"
             entry: dict[str, Any] = {
                 "dataSource": "traces",

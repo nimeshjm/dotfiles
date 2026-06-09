@@ -51,7 +51,6 @@ attrs = {
     "gen_ai.tool.type":      "extension" if is_mcp else "function",
     "gen_ai.tool.success":   True,
     "tool_use_id":           tool_use_id,
-    "tool.duration_ms":      (now - start_ns) // 1_000_000,
 }
 
 if is_mcp and len(parts) >= 3:

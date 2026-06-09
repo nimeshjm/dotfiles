@@ -39,7 +39,6 @@ emit_span(
         "tool_use_id":             tool_use_id,
         "permission.denied":       True,
         "permission.deny_reason":  data.get("deny_reason", ""),
-        "permission.decision_ms":  (now - start_ns) // 1_000_000,
     },
     start_time_ns=start_ns,
     end_time_ns=now,

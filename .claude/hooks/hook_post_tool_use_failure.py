@@ -50,7 +50,6 @@ attrs = {
     "gen_ai.tool.type":      "extension" if is_mcp else "function",
     "gen_ai.tool.success":   False,
     "tool_use_id":           tool_use_id,
-    "tool.duration_ms":      data.get("duration_ms", 0),
     "error.message":         error[:500],
     "error.type":            data.get("error_type", "unknown"),
 }

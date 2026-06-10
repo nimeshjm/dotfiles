@@ -117,10 +117,32 @@ Every span also receives `session.id`, `cwd`, `git.repo`, and `git.origin` from 
 > `git.origin` and `git.repo`. Repos using HTTPS remotes will show empty `git.*` attributes
 > by design — HTTPS URLs may contain embedded credentials and are never exported to spans.
 
-**Disabled hooks** (files kept, wiring removed from settings.json):
+**Removed hooks** (deleted; see git history if ever needed):
 - `CwdChanged` — redundant; `cwd` is already on every tool span
 - `PostToolBatch` — reconstructable in Honeycomb by grouping tool spans on `session.id + time`
-- `PreToolUse` — still runs to write the start-time state file, but emits no span
+
+`PreToolUse` still runs to write the start-time state file, but emits no span.
+
+## Shared helpers
+
+`otel_span.py` is the single import target for every hook. Besides the OTLP
+emitter (`emit_span`, `read_stdin`) it provides:
+
+| Helper | Purpose |
+|---|---|
+| `write_state(name, content)` | Write a file in `~/.cache/claude-hooks/` (0700 dir, `O_NOFOLLOW`); errors swallowed |
+| `read_state(name)` | Read a state file without deleting; `""` if missing |
+| `pop_state(name)` / `pop_state_int(name, default)` | Read and delete — used by the consuming half of each hook pair |
+| `tool_attrs(tool_name)` | Standard `gen_ai.tool.*` attributes incl. MCP server/action parsing |
+| `log_debug(msg)` | Timestamped line to stderr + `~/.cache/claude-hooks/hook_stop.log` |
+
+`transcript.py` reads transcript JSONL files backwards (chunked reverse scan):
+`last_assistant_message()` for model/usage/stop_reason, `read_turn_data()` for
+tools called, LOC changes, user prompt, and final summary.
+
+`jira_comment.py` posts a turn summary to the Jira ticket named in the git
+branch (`CSMP-1234-description` → `CSMP-1234`) via the `jira` CLI. Called by
+`hook_stop.py` after span emission; fails soft and logs to `hook_stop.log`.
 
 ## Derived metrics (copy-paste Honeycomb queries)
 
@@ -350,14 +372,16 @@ Use absolute paths in the command fields instead of `${CLAUDE_PROJECT_DIR}`.
 ├── install.py                 ← copies hooks, merges settings.json
 ├── settings.json              ← hook wiring + OTel env vars
 └── hooks/
-    ├── otel_span.py           ← shared OTLP emitter (imported by all hooks)
+    ├── otel_span.py           ← shared OTLP emitter + state-file/logging helpers
+    ├── transcript.py          ← backwards JSONL transcript reader (used by hook_stop)
+    ├── jira_comment.py        ← Jira turn-summary comment poster (used by hook_stop)
     ├── hook_session_start.py
     ├── hook_session_end.py
     ├── hook_user_prompt_submit.py
     ├── hook_pre_tool_use.py   ← writes start-time state file only; no span
     ├── hook_post_tool_use.py
     ├── hook_post_tool_use_failure.py
-    ├── hook_stop.py
+    ├── hook_stop.py           ← turn span + Jira comment orchestration
     ├── hook_stop_failure.py
     ├── hook_subagent_start.py
     ├── hook_subagent_stop.py
@@ -366,8 +390,6 @@ Use absolute paths in the command fields instead of `${CLAUDE_PROJECT_DIR}`.
     ├── hook_permission_request.py
     ├── hook_permission_denied.py
     ├── hook_notification.py   ← emits only for permission_prompt and idle_prompt
-    ├── hook_cwd_changed.py    ← disabled in settings.json
-    ├── hook_post_tool_batch.py ← disabled in settings.json
     └── dev/
         └── dump_env.py        ← dev tool: dump subprocess env vars (not a configured hook)
 ```

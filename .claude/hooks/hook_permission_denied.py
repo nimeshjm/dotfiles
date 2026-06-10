@@ -10,9 +10,8 @@ stdin fields:
   tool_name, tool_use_id, tool_input
   deny_reason (optional)
 """
-import sys, os, time
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from otel_span import read_stdin, emit_span, _state_path
+import time
+from otel_span import read_stdin, emit_span, pop_state_int
 
 data        = read_stdin()
 now         = time.time_ns()
@@ -20,15 +19,7 @@ tool_name   = data.get("tool_name", "unknown")
 tool_use_id = data.get("tool_use_id", tool_name)
 session_id  = data.get("session_id", "")
 
-start_ns = now
-perm_file = _state_path(f"claude_perm_{session_id}_{tool_use_id}.ts")
-if os.path.exists(perm_file):
-    try:
-        with open(perm_file) as f:
-            start_ns = int(f.read().strip())
-        os.unlink(perm_file)
-    except (ValueError, OSError):
-        pass
+start_ns = pop_state_int(f"claude_perm_{session_id}_{tool_use_id}.ts", now)
 
 emit_span(
     "claude_code.permission.denied",

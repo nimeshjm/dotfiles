@@ -9,28 +9,22 @@ stdin fields:
   trigger: "manual" | "auto"
   context_size_tokens (tokens after compaction)
 """
-import sys, os, time, json
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from otel_span import read_stdin, emit_span, _state_path
+import time, json
+from otel_span import read_stdin, emit_span, pop_state
 
-data       = read_stdin()
-now        = time.time_ns()
-session_id = data.get("session_id", "")
+data         = read_stdin()
+now          = time.time_ns()
+session_id   = data.get("session_id", "")
 tokens_after = data.get("context_size_tokens", 0)
 
-start_ns    = now
+start_ns      = now
 tokens_before = 0
-
-ts_file = _state_path(f"claude_compact_{session_id}.pre")
-if os.path.exists(ts_file):
-    try:
-        with open(ts_file) as f:
-            pre = json.load(f)
-        start_ns      = int(pre.get("ts", now))
-        tokens_before = int(pre.get("tokens", 0))
-        os.unlink(ts_file)
-    except (ValueError, KeyError, OSError):
-        pass
+try:
+    pre = json.loads(pop_state(f"claude_compact_{session_id}.pre"))
+    start_ns      = int(pre.get("ts", now))
+    tokens_before = int(pre.get("tokens", 0))
+except (ValueError, KeyError):
+    pass
 
 tokens_saved = max(0, tokens_before - tokens_after)
 

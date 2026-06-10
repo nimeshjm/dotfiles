@@ -16,8 +16,7 @@ stdin fields:
   session_id, cwd, hook_event_name
   notification_type, message (optional)
 """
-import sys, os, time
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import sys, time
 from otel_span import read_stdin, emit_span
 
 data              = read_stdin()

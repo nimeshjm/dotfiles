@@ -7,25 +7,15 @@ stdin fields:
   session_id, cwd, hook_event_name
   agent_id, agent_type
 """
-import sys, os, time
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from otel_span import read_stdin, emit_span, _state_path
+import time
+from otel_span import read_stdin, emit_span, pop_state_int
 
 data       = read_stdin()
 now        = time.time_ns()
 agent_id   = data.get("agent_id", "")
 session_id = data.get("session_id", "")
 
-start_ns = now
-start_file = _state_path(f"claude_subagent_{session_id}_{agent_id}.start")
-if os.path.exists(start_file):
-    try:
-        with open(start_file) as f:
-            start_ns = int(f.read().strip())
-        os.unlink(start_file)
-    except (ValueError, OSError):
-        pass
-
+start_ns    = pop_state_int(f"claude_subagent_{session_id}_{agent_id}.start", now)
 duration_ms = (now - start_ns) // 1_000_000
 
 emit_span(

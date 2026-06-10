@@ -13,6 +13,7 @@ Install once:
 """
 from __future__ import annotations
 
+import datetime
 import os
 import sys
 import time
@@ -66,6 +67,72 @@ def _open_state_file(name: str) -> "IO[str]":
         flags |= os.O_NOFOLLOW
     fd = os.open(path, flags, 0o600)
     return os.fdopen(fd, "w")
+
+
+def write_state(name: str, content: str) -> None:
+    """Write a state file; failures are swallowed so hooks never block."""
+    try:
+        with _open_state_file(name) as f:
+            f.write(content)
+    except OSError:
+        pass
+
+
+def read_state(name: str) -> str:
+    """Return a state file's contents (stripped), or "" if missing/unreadable."""
+    try:
+        with open(_state_path(name)) as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+def pop_state(name: str) -> str:
+    """Return a state file's contents and delete it; "" if missing/unreadable."""
+    content = read_state(name)
+    try:
+        os.unlink(_state_path(name))
+    except OSError:
+        pass
+    return content
+
+
+def pop_state_int(name: str, default: int) -> int:
+    """pop_state() parsed as int; `default` on missing/corrupt content."""
+    try:
+        return int(pop_state(name))
+    except ValueError:
+        return default
+
+
+def tool_attrs(tool_name: str) -> dict[str, Any]:
+    """Standard gen_ai.tool.* attributes for a tool name.
+
+    MCP tools are named mcp__{server}__{action}; expose the parts so
+    dashboards can group by server.
+    """
+    is_mcp = tool_name.startswith("mcp__")
+    attrs: dict[str, Any] = {
+        "gen_ai.tool.name": tool_name,
+        "gen_ai.tool.type": "extension" if is_mcp else "function",
+    }
+    parts = tool_name.split("__")
+    if is_mcp and len(parts) >= 3:
+        attrs["gen_ai.tool.mcp_server"] = parts[1]
+        attrs["gen_ai.tool.mcp_action"] = parts[2]
+    return attrs
+
+
+def log_debug(msg: str, component: str = "hook_stop") -> None:
+    """Timestamped debug line to stderr and ~/.cache/claude-hooks/{component}.log."""
+    ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    print(f"[{component}] {msg}", file=sys.stderr)
+    try:
+        os.makedirs(_STATE_DIR, mode=0o700, exist_ok=True)
+        with open(_state_path(f"{component}.log"), "a") as f:
+            f.write(f"{ts} {msg}\n")
+    except OSError:
+        pass
 
 
 def _is_ssh_remote(url: str) -> bool:

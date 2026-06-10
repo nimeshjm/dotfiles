@@ -19,6 +19,7 @@ import json
 import os
 import re
 import shutil
+import string
 import tempfile
 import urllib.error
 import urllib.request
@@ -28,6 +29,9 @@ from typing import Any
 
 SCRIPT_DIR = Path(__file__).parent
 HOME_CLAUDE = Path.home() / ".claude"
+
+# Aggregations are referenced by letter (A, B, C …) in formulas on both backends
+QUERY_NAMES = string.ascii_uppercase
 
 # ---------------------------------------------------------------------------
 # Settings merge helpers (unchanged)
@@ -65,7 +69,12 @@ def _deep_merge(dest: dict, src: dict) -> dict:
 
 
 def install_hooks() -> None:
-    shutil.copytree(SCRIPT_DIR / "hooks", HOME_CLAUDE / "hooks", dirs_exist_ok=True)
+    shutil.copytree(
+        SCRIPT_DIR / "hooks",
+        HOME_CLAUDE / "hooks",
+        dirs_exist_ok=True,
+        ignore=shutil.ignore_patterns("__pycache__"),
+    )
 
 
 def merge_settings(backend: "Backend") -> None:
@@ -494,7 +503,6 @@ class HoneycombBackend:
     def _ir_to_hc_spec(self, query: dict) -> dict:
         """Translate a neutral query IR dict → Honeycomb query spec."""
         has_formulas = bool(query.get("formulas"))
-        query_names = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 
         # calculations: [{op, column?, name?}]
         # Names are required when formulas are present (Honeycomb needs $name refs)
@@ -504,7 +512,7 @@ class HoneycombBackend:
             if "field" in agg:
                 entry["column"] = agg["field"]
             if has_formulas:
-                entry["name"] = query_names[i]
+                entry["name"] = QUERY_NAMES[i]
             calculations.append(entry)
 
         # filters: span_name filter first, then extra filters
@@ -598,6 +606,39 @@ _SZ_PANEL_TYPE: dict[str, str] = {
     "value": "value",
 }
 
+# Static visual config shared by every SigNoz widget (v5 format). Computed
+# fields (decimalPrecision, yAxisUnit) are set per-panel in _panel_to_widget.
+_SZ_WIDGET_DEFAULTS: dict[str, Any] = {
+    "bucketCount": 30,
+    "bucketWidth": 0,
+    "columnUnits": {},
+    "contextLinks": {"linksData": []},
+    "customLegendColors": {},
+    "fillMode": "none",
+    "fillSpans": False,
+    "isLogScale": False,
+    "legendPosition": "bottom",
+    "lineInterpolation": "spline",
+    "lineStyle": "solid",
+    "mergeAllActiveQueries": False,
+    "nullZeroValues": "zero",
+    "opacity": "1",
+    "selectedLogFields": [],
+    "selectedTracesFields": [
+        {"fieldContext": "resource", "fieldDataType": "string", "name": "service.name", "signal": "traces"},
+        {"fieldContext": "span", "fieldDataType": "string", "name": "name", "signal": "traces"},
+        {"fieldContext": "span", "fieldDataType": "", "name": "duration_nano", "signal": "traces"},
+    ],
+    "showPoints": False,
+    "softMax": 0,
+    "softMin": 0,
+    "spanGaps": True,
+    "stackedBarChart": False,
+    "thresholds": [],
+    "timePreferance": "GLOBAL_TIME",
+}
+
+
 def _sz_filter_value(v: Any) -> str:
     """Render a filter value as a SQL-like literal for SigNoz expression strings."""
     if isinstance(v, bool):
@@ -605,6 +646,100 @@ def _sz_filter_value(v: Any) -> str:
     if isinstance(v, str):
         return f"'{v}'"
     return str(v)
+
+
+def _sz_order_by(o: dict, aggs: list[dict]) -> dict:
+    """Translate one IR order clause → SigNoz orderBy entry.
+
+    Uses the 0-based aggregation index as columnName: in the expression-based
+    format, "count()" is NOT a valid key; only the index ("0", "1", …),
+    group-by field names, and expression strings like "avg(field)" are
+    accepted.  Index notation covers all cases.
+    """
+    order_str = "desc" if "desc" in o.get("order", "desc") else "asc"
+    o_op = o.get("op", "COUNT")
+    o_field = o.get("field", "")
+    for idx, agg in enumerate(aggs):
+        if agg["op"] == o_op and agg.get("field", "") == o_field:
+            return {"columnName": str(idx), "order": order_str}
+    return {"columnName": "0", "order": order_str}  # fallback
+
+
+def _sz_series_legend(agg: dict, aggs: list[dict], q: dict) -> str:
+    """Legend for one series of a multi-aggregation panel.
+
+    - single agg or grouped → "" (panel title / group value is enough)
+    - multiple aggs, all unique ops → label by op name ("avg", "p95")
+    - multiple aggs, same op on different fields → last field component
+    """
+    if len(aggs) <= 1 or q.get("breakdowns"):
+        return ""
+    if len({a["op"] for a in aggs}) == len(aggs):
+        return _SZ_AGG_OP.get(agg["op"], agg["op"].lower())
+    field = agg.get("field", "")
+    return field.split(".")[-1] if field else ""
+
+
+def _sz_query_data(q: dict) -> list[dict]:
+    """Build SigNoz queryData — one entry per aggregation (A, B, C …).
+
+    Uses SigNoz's expression-based query builder format (the format the UI
+    saves when you edit a panel manually), with expression strings for
+    filters, aggregations, and having.
+    """
+    aggs = q["aggregations"]
+
+    # Filter expression: "name = 'span_name' AND field op value …"
+    filter_parts = [f"name = '{q['span_name']}'"]
+    for f in q.get("filters", []):
+        filter_parts.append(f"{f['field']} {f['op']} {_sz_filter_value(f['value'])}")
+    filter_expr = {"expression": " AND ".join(filter_parts)}
+
+    # GroupBy: SigNoz still expects key-metadata objects here (not expression strings)
+    group_by = [
+        {"key": b, "dataType": "string", "type": "tag", "isColumn": False, "isJSON": False}
+        for b in q.get("breakdowns", [])
+    ]
+
+    order_by = [_sz_order_by(o, aggs) for o in q.get("orders", [])]
+
+    query_data: list[dict] = []
+    for i, agg in enumerate(aggs):
+        agg_op = _SZ_AGG_OP.get(agg["op"], "count")
+        agg_field = _SZ_FIELD_MAP.get(agg.get("field", ""), agg.get("field", ""))
+        query_data.append({
+            "dataSource": "traces",
+            "queryName": QUERY_NAMES[i],
+            "aggregations": [{"expression": f"{agg_op}({agg_field})" if agg_field else f"{agg_op}()"}],
+            "filter": filter_expr,
+            "groupBy": group_by,
+            "expression": QUERY_NAMES[i],
+            "disabled": False,
+            "legend": _sz_series_legend(agg, aggs, q),
+            "stepInterval": None,
+            "orderBy": order_by,
+            "having": {"expression": ""},
+            "limit": q.get("limit", None),
+            "functions": [],
+            "source": "",
+        })
+    return query_data
+
+
+def _sz_formulas(q: dict) -> list[dict]:
+    """Query formulas — derived expressions over the named queries (A, B, C …).
+
+    IR: [{"expression": "B/(A+B)", "legend": "cache hit ratio"}, …]
+    """
+    return [
+        {
+            "disabled": False,
+            "expression": f["expression"],
+            "legend": f.get("legend", ""),
+            "queryName": f"F{i + 1}",
+        }
+        for i, f in enumerate(q.get("formulas", []))
+    ]
 
 
 class SignozBackend:
@@ -627,10 +762,6 @@ class SignozBackend:
     def _panel_to_widget(self, panel: dict) -> dict:
         """Translate one IR panel → SigNoz v5 dashboard widget object.
 
-        Uses SigNoz's expression-based query builder format (the format the UI
-        saves when you edit a panel manually), with expression strings for
-        filters, aggregations, groupBy, and having.
-
         Returns a dict with a '_layout' key (popped by render_dashboard into
         the dashboard-level layout array) plus all widget fields.
         """
@@ -638,148 +769,33 @@ class SignozBackend:
         widget_id = str(uuid.uuid4())
         layout = panel["layout"]
 
-        # Panel type: map IR chart_type directly
-        panel_type = _SZ_PANEL_TYPE.get(panel["chart_type"], "graph")
-
-        # Filter expression: "name = 'span_name' AND field op value …"
-        filter_parts = [f"name = '{q['span_name']}'"]
-        for f in q.get("filters", []):
-            filter_parts.append(f"{f['field']} {f['op']} {_sz_filter_value(f['value'])}")
-        filter_expr = {"expression": " AND ".join(filter_parts)}
-
-        # GroupBy: SigNoz still expects key-metadata objects here (not expression strings)
-        group_by = [
-            {"key": b, "dataType": "string", "type": "tag", "isColumn": False, "isJSON": False}
-            for b in q.get("breakdowns", [])
-        ]
-
-        aggs = q["aggregations"]
-
-        # OrderBy — use 0-based aggregation index as columnName.
-        # In the expression-based format, "count()" is NOT a valid key; only
-        # the index ("0", "1", …), group-by field names, and expression strings
-        # like "avg(field)" are accepted.  Index notation covers all cases.
-        def _sz_order_by(o: dict) -> dict:
-            order_str = "desc" if "desc" in o.get("order", "desc") else "asc"
-            o_op = o.get("op", "COUNT")
-            o_field = o.get("field", "")
-            for idx, agg in enumerate(aggs):
-                if agg["op"] == o_op and agg.get("field", "") == o_field:
-                    return {"columnName": str(idx), "order": order_str}
-            return {"columnName": "0", "order": order_str}  # fallback
-
-        order_by = [_sz_order_by(o) for o in q.get("orders", [])]
-
-        # Legend strategy for multi-aggregation panels (no breakdown):
-        #   - single agg or grouped → "" (panel title / group value is enough)
-        #   - multiple aggs, all unique ops → label by op name ("avg", "p95")
-        #   - multiple aggs, same op on different fields → last field component
-        first_agg_op_ir = aggs[0]["op"] if aggs else "COUNT"
-        _multi = len(aggs) > 1 and not q.get("breakdowns")
-        _ops_unique = len({a["op"] for a in aggs}) == len(aggs)
-
-        def _series_legend(agg: dict) -> str:
-            if not _multi:
-                return ""
-            if _ops_unique:
-                return _SZ_AGG_OP.get(agg["op"], agg["op"].lower())
-            field = agg.get("field", "")
-            return field.split(".")[-1] if field else ""
-
-        # One queryData entry per aggregation (A, B, C …)
-        query_names = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-        query_data: list[dict] = []
-        for i, agg in enumerate(aggs):
-            qname = query_names[i]
-            agg_op = _SZ_AGG_OP.get(agg["op"], "count")
-            agg_field = _SZ_FIELD_MAP.get(agg.get("field", ""), agg.get("field", ""))
-            agg_expr = f"{agg_op}({agg_field})" if agg_field else f"{agg_op}()"
-            entry: dict[str, Any] = {
-                "dataSource": "traces",
-                "queryName": qname,
-                "aggregations": [{"expression": agg_expr}],
-                "filter": filter_expr,
-                "groupBy": group_by,
-                "expression": qname,
-                "disabled": False,
-                "legend": _series_legend(agg),
-                "stepInterval": None,
-                "orderBy": order_by,
-                "having": {"expression": ""},
-                "limit": q.get("limit", None),
-                "functions": [],
-                "source": "",
-            }
-            query_data.append(entry)
-
-        # Query formulas — derived expressions over the named queries (A, B, C …)
-        # IR: [{"expression": "B/(A+B)", "legend": "cache hit ratio"}, …]
-        query_formulas = [
-            {
-                "disabled": False,
-                "expression": f["expression"],
-                "legend": f.get("legend", ""),
-                "queryName": f"F{i + 1}",
-            }
-            for i, f in enumerate(q.get("formulas", []))
-        ]
-
         # decimalPrecision: panel override → 0 for counts/sums → 2 for avg/percentiles
+        first_agg_op = q["aggregations"][0]["op"] if q["aggregations"] else "COUNT"
         decimal_precision = panel.get(
             "decimal_precision",
-            0 if first_agg_op_ir in ("COUNT", "SUM") else 2,
+            0 if first_agg_op in ("COUNT", "SUM") else 2,
         )
 
-        query_id = str(uuid.uuid4())
-        widget: dict[str, Any] = {
+        return {
             "id": widget_id,
             "title": panel["name"],
             "description": panel["desc"],
-            "panelTypes": panel_type,
-            # ── v5 visual fields ──────────────────────────────────────────────
-            "bucketCount": 30,
-            "bucketWidth": 0,
-            "columnUnits": {},
-            "contextLinks": {"linksData": []},
-            "customLegendColors": {},
+            "panelTypes": _SZ_PANEL_TYPE.get(panel["chart_type"], "graph"),
+            **_SZ_WIDGET_DEFAULTS,
             "decimalPrecision": decimal_precision,
-            "fillMode": "none",
-            "fillSpans": False,
-            "isLogScale": False,
-            "legendPosition": "bottom",
-            "lineInterpolation": "spline",
-            "lineStyle": "solid",
-            "mergeAllActiveQueries": False,
-            "nullZeroValues": "zero",
-            "opacity": "1",
-            "selectedLogFields": [],
-            "selectedTracesFields": [
-                {"fieldContext": "resource", "fieldDataType": "string", "name": "service.name", "signal": "traces"},
-                {"fieldContext": "span", "fieldDataType": "string", "name": "name", "signal": "traces"},
-                {"fieldContext": "span", "fieldDataType": "", "name": "duration_nano", "signal": "traces"},
-            ],
-            "showPoints": False,
-            "softMax": 0,
-            "softMin": 0,
-            "spanGaps": True,
-            "stackedBarChart": False,
-            "thresholds": [],
-            "timePreferance": "GLOBAL_TIME",
             "yAxisUnit": panel.get("y_axis_unit", ""),
-            # ── query ─────────────────────────────────────────────────────────
             "query": {
-                "id": query_id,
+                "id": str(uuid.uuid4()),
                 "queryType": "builder",
                 "unit": "",
                 "promql": [{"query": "", "legend": "", "disabled": False, "name": "A"}],
                 "clickhouse_sql": [{"query": "", "legend": "", "disabled": False, "name": "A"}],
                 "builder": {
-                    "queryData": query_data,
-                    "queryFormulas": query_formulas,
+                    "queryData": _sz_query_data(q),
+                    "queryFormulas": _sz_formulas(q),
                     "queryTraceOperator": [],
                 },
             },
-            # ── layout (popped into dashboard-level layout array) ─────────────
             "_layout": {
                 "h": layout["h"],
                 "i": widget_id,
@@ -790,7 +806,6 @@ class SignozBackend:
                 "y": layout["y"],
             },
         }
-        return widget
 
     def render_dashboard(self, panels: list[dict]) -> dict:
         """Build a SigNoz v5 dashboard dict from IR panels."""

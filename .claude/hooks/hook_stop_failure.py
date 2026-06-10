@@ -10,8 +10,7 @@ stdin fields:
   error_type: "rate_limit" | "authentication_failed" | "billing_error" |
               "invalid_request" | "server_error" | "max_output_tokens" | "unknown"
 """
-import sys, os, time
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import time
 from otel_span import read_stdin, emit_span
 
 data       = read_stdin()

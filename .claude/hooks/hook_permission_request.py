@@ -11,9 +11,8 @@ stdin fields:
   tool_name, tool_use_id, tool_input
   permission_mode: current mode at time of request
 """
-import sys, os, time
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from otel_span import read_stdin, emit_span, _open_state_file
+import time
+from otel_span import read_stdin, emit_span, write_state
 
 data        = read_stdin()
 now         = time.time_ns()
@@ -22,11 +21,7 @@ tool_use_id = data.get("tool_use_id", tool_name)
 session_id  = data.get("session_id", "")
 
 # Persist so we can compute human-decision latency downstream
-try:
-    with _open_state_file(f"claude_perm_{session_id}_{tool_use_id}.ts") as f:
-        f.write(str(now))
-except OSError:
-    pass
+write_state(f"claude_perm_{session_id}_{tool_use_id}.ts", str(now))
 
 emit_span(
     "claude_code.permission.request",

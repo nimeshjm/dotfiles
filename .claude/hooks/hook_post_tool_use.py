@@ -8,9 +8,8 @@ stdin fields:
   session_id, cwd, hook_event_name
   tool_name, tool_use_id, tool_input, tool_response, duration_ms
 """
-import sys, os, time, json
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from otel_span import read_stdin, emit_span, _state_path
+import os, time, json
+from otel_span import read_stdin, emit_span, pop_state_int, read_state, tool_attrs
 
 data        = read_stdin()
 now         = time.time_ns()
@@ -18,44 +17,20 @@ tool_name   = data.get("tool_name", "unknown")
 tool_use_id = data.get("tool_use_id", tool_name)
 session_id  = data.get("session_id", "")
 
-# Retrieve the start time written by PreToolUse
-start_ns   = now
-start_file = _state_path(f"claude_hook_{session_id}_{tool_use_id}.start")
-if os.path.exists(start_file):
-    try:
-        with open(start_file) as f:
-            start_ns = int(f.read().strip())
-        os.unlink(start_file)
-    except (ValueError, OSError):
-        pass
-
-# Read turn_id if available (written by UserPromptSubmit, cleared by Stop)
-turn_id   = ""
-turn_file = _state_path(f"claude_turn_{session_id}.id")
-if os.path.exists(turn_file):
-    try:
-        with open(turn_file) as f:
-            turn_id = f.read().strip()
-    except OSError:
-        pass
-
-is_mcp = tool_name.startswith("mcp__")
-parts  = tool_name.split("__") if is_mcp else []
+# Start time written by PreToolUse; turn_id written by UserPromptSubmit
+# (turn_id is read without deleting — Stop clears it at end of turn)
+start_ns = pop_state_int(f"claude_hook_{session_id}_{tool_use_id}.start", now)
+turn_id  = read_state(f"claude_turn_{session_id}.id")
 
 attrs = {
     "session.id":            session_id,
     "cwd":                   data.get("cwd", ""),
     "turn.id":               turn_id,
     "gen_ai.operation.name": "tool_call",
-    "gen_ai.tool.name":      tool_name,
-    "gen_ai.tool.type":      "extension" if is_mcp else "function",
+    **tool_attrs(tool_name),
     "gen_ai.tool.success":   True,
     "tool_use_id":           tool_use_id,
 }
-
-if is_mcp and len(parts) >= 3:
-    attrs["gen_ai.tool.mcp_server"] = parts[1]
-    attrs["gen_ai.tool.mcp_action"] = parts[2]
 
 # Lines changed for Edit/Write — proxy for code output volume
 tool_input_data = data.get("tool_input", {}) or {}

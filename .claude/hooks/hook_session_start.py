@@ -7,20 +7,15 @@ stdin fields:
   session_id, cwd, hook_event_name
   trigger: "startup" | "resume" | "clear" | "compact"
 """
-import sys, os, time
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from otel_span import read_stdin, emit_span, _state_path, _open_state_file
+import time
+from otel_span import read_stdin, emit_span, write_state
 
 data       = read_stdin()
 now        = time.time_ns()
 session_id = data.get("session_id", "")
 
 if session_id:
-    try:
-        with _open_state_file(f"claude_session_{session_id}.start_ns") as f:
-            f.write(str(now))
-    except OSError:
-        pass
+    write_state(f"claude_session_{session_id}.start_ns", str(now))
 
 emit_span(
     "claude_code.session.start",

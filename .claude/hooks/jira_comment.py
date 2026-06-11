@@ -19,6 +19,9 @@ import time
 from otel_span import log_debug
 from transcript import read_turn_data
 
+# Jira Cloud rejects comments longer than 32,767 characters
+JIRA_COMMENT_LIMIT = 32_000
+
 
 def extract_branch_ticket(cwd: str) -> str:
     """Return Jira ticket ID from the active git branch, e.g. 'CSMP-1234'."""
@@ -100,13 +103,11 @@ def format_comment(turn: dict, plan_content: str) -> str:
     parts = ["## Claude Code Turn Summary\n"]
 
     if user_prompt:
-        truncated = user_prompt[:500] + ("..." if len(user_prompt) > 500 else "")
-        parts.append(f"**Request:** {truncated}\n")
+        parts.append(f"**Request:** {user_prompt}\n")
 
     if final_summary:
         parts.append("### Summary\n")
-        truncated = final_summary[:2000] + ("..." if len(final_summary) > 2000 else "")
-        parts.append(f"{truncated}\n")
+        parts.append(f"{final_summary}\n")
 
     if tool_calls:
         parts.append("### Tools Called\n")
@@ -127,10 +128,13 @@ def format_comment(turn: dict, plan_content: str) -> str:
 
     if plan_content:
         parts.append("---\n### Plan\n")
-        truncated = plan_content[:3000] + ("..." if len(plan_content) > 3000 else "")
-        parts.append(f"```\n{truncated}\n```")
+        parts.append(f"```\n{plan_content}\n```")
 
-    return "\n".join(parts)
+    comment = "\n".join(parts)
+    if len(comment) > JIRA_COMMENT_LIMIT:
+        marker = "\n```\n\n_[comment truncated to fit Jira's 32,767-character limit]_"
+        comment = comment[:JIRA_COMMENT_LIMIT] + marker
+    return comment
 
 
 def post_comment(ticket_id: str, comment: str) -> bool:

@@ -474,6 +474,63 @@ PANELS: list[dict[str, Any]] = [
             "time_range": 86400,
         },
     },
+    # ── Row 72 (y=72, h=6): Tokens per repo ─────────────────────────────────
+    {
+        "name": "Tokens per Repo",
+        "desc": (
+            "Total input, cache-read, output, and cache-creation tokens broken down "
+            "by repo (git.repo; blank = non-git cwd or HTTPS remote)"
+        ),
+        "chart_type": "table",
+        "y_axis_unit": "short",
+        "layout": {"x": 0, "y": 72, "w": 12, "h": 6},
+        "query": {
+            "span_name": "claude_code.turn.stop",
+            "aggregations": [
+                {"op": "SUM", "field": "gen_ai.usage.input_tokens"},
+                {"op": "SUM", "field": "gen_ai.usage.cache_read_tokens"},
+                {"op": "SUM", "field": "gen_ai.usage.output_tokens"},
+                {"op": "SUM", "field": "gen_ai.usage.cache_creation_tokens"},
+            ],
+            "breakdowns": ["git.repo"],
+            "orders": [{"op": "SUM", "field": "gen_ai.usage.output_tokens", "order": "descending"}],
+            "limit": 20,
+            "time_range": 86400,
+        },
+    },
+    # ── Row 78 (y=78, h=6): Estimated cost per repo ─────────────────────────
+    {
+        "name": "Estimated Cost per Repo (USD)",
+        "desc": (
+            "Approximate USD cost per repo (git.repo; blank = non-git cwd or HTTPS remote). "
+            "Rates (verify at anthropic.com/pricing): "
+            "Sonnet $3/$15/$0.30/$3.75 per MTok input/output/cache-read/cache-creation; "
+            "Haiku $0.80/$4/$0.08/$1. "
+            "Formula uses Sonnet rates for all models — Haiku cost is overestimated ~3–4x."
+        ),
+        "chart_type": "table",
+        "decimal_precision": 4,
+        "layout": {"x": 0, "y": 78, "w": 12, "h": 6},
+        "query": {
+            "span_name": "claude_code.turn.stop",
+            "aggregations": [
+                {"op": "SUM", "field": "gen_ai.usage.input_tokens"},        # A
+                {"op": "SUM", "field": "gen_ai.usage.output_tokens"},       # B
+                {"op": "SUM", "field": "gen_ai.usage.cache_read_tokens"},   # C
+                {"op": "SUM", "field": "gen_ai.usage.cache_creation_tokens"},  # D
+            ],
+            # Sonnet-rate formula: $3/$15/$0.30/$3.75 per MTok
+            "formulas": [
+                {
+                    "expression": "A * 0.000003 + B * 0.000015 + C * 0.0000003 + D * 0.00000375",
+                    "legend": "total_cost_usd",
+                }
+            ],
+            "breakdowns": ["git.repo"],
+            "limit": 20,
+            "time_range": 86400,
+        },
+    },
 ]
 
 

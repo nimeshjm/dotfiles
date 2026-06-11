@@ -269,7 +269,7 @@ Paste any of these into the Honeycomb query builder: **New Query → `{ }` JSON 
 
 ## Honeycomb board
 
-`install.py` creates a pre-built **Claude Code Sessions** board in the `claude` environment with 16 panels arranged in logical groups:
+`install.py` creates a pre-built **Claude Code Sessions** board in the `claude` environment with 21 panels arranged in logical groups:
 
 **Row 1 — Activity counts** (bar charts)
 
@@ -316,6 +316,19 @@ Paste any of these into the Honeycomb query builder: **New Query → `{ }` JSON 
 | Panel | Query | Display |
 |-------|-------|---------|
 | Permission Denials | `COUNT` of `claude_code.permission.denied`, breakdown by `gen_ai.tool.name` | Table |
+
+**Rows 9–12 — Token spend breakdowns** (full-width tables)
+
+| Panel | Query | Display |
+|-------|-------|---------|
+| Tokens per Model | `SUM` of input + cache-read + output + cache-creation tokens on `claude_code.turn.stop`, breakdown by `gen_ai.request.model` | Table |
+| Estimated Cost per Model (USD) | Token sums × Sonnet rates ($3/$15/$0.30/$3.75 per MTok input/output/cache-read/cache-creation), breakdown by `gen_ai.request.model` | Table |
+| Tokens per Repo | `SUM` of input + cache-read + output + cache-creation tokens on `claude_code.turn.stop`, breakdown by `git.repo` | Table |
+| Estimated Cost per Repo (USD) | Same Sonnet-rate cost formula, breakdown by `git.repo` | Table |
+
+The per-repo panels rely on the `git.repo` span attribute, which is only set for SSH-shaped
+remotes — turns in non-git directories or repos with HTTPS remotes land in a blank group.
+The cost formula uses Sonnet rates for all models, so Haiku cost is overestimated ~3–4x.
 
 All panels default to the last 24 h. The board time window can be changed interactively in the Honeycomb UI without affecting the saved queries.
 

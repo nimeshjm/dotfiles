@@ -331,17 +331,19 @@ To recreate the board after deleting it, run `python3 .claude/install.py` first 
 
 Set in `.claude/settings.json` env section. All off by default.
 
-**Prompt text is never captured or exported** — there is no opt-in flag for `gen_ai.prompt` attributes.
+**Prompt and response text is captured only when `OTEL_LOG_MESSAGES=1`; it is off by default.**
 
 | Env var | What it adds | Privacy risk |
 |---|---|---|
 | `OTEL_LOG_TOOL_DETAILS=1` | Tool input args on `tool` spans | May expose file paths, code, or commands |
 | `OTEL_LOG_TOOL_CONTENT=1` | Tool output on `tool` spans | May expose file contents or command output |
+| `OTEL_LOG_MESSAGES=1` | gen_ai.input.messages / gen_ai.output.messages on llm_call spans (OTel GenAI semconv JSON, 16k cap; input is the per-call delta, not full history; thinking blocks omitted) | Exposes prompt text, tool results, and assistant responses |
 
 > **Warning**: enabling any of these options ships potentially sensitive text to your OTLP
 > backend (Honeycomb). Review your data retention and access policies before enabling in
 > shared or production environments. Captured text may include API keys, passwords, and
-> personal data.
+> personal data. `OTEL_LOG_MESSAGES` specifically ships full conversation content
+> (prompts, tool outputs, assistant text) to the OTLP backend.
 
 ## Testing a single hook manually
 

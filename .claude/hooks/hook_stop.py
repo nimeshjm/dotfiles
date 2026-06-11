@@ -14,7 +14,7 @@ transcript JSONL (transcript_path), since the Stop payload omits them.
 """
 import os, time, json
 from otel_span import read_stdin, emit_spans, pop_state, pop_state_int, write_state, log_debug
-from transcript import last_assistant_message, turn_llm_calls
+from transcript import last_assistant_message, turn_llm_calls, format_genai_input_messages, format_genai_output_messages
 import jira_comment
 
 data       = read_stdin()
@@ -28,13 +28,15 @@ write_state("last_stop_payload.json", json.dumps(data, indent=2))
 transcript_path = data.get("transcript_path", "")
 log_debug(f"reading transcript path={transcript_path!r} exists={os.path.exists(transcript_path)}")
 
+LOG_MESSAGES = os.environ.get("OTEL_LOG_MESSAGES") == "1"
+
 # Read and clear the turn_id + turn start written by UserPromptSubmit.
 # pop (not read): if StopFailure already claimed the root, fall back to standalone.
 turn_id       = pop_state(f"claude_turn_{session_id}.id")
 turn_start_ns = pop_state_int(f"claude_turn_{session_id}.start_ns", now)
 
 # One record per deduped assistant API response in this turn
-llm_calls = turn_llm_calls(transcript_path)
+llm_calls = turn_llm_calls(transcript_path, include_content=LOG_MESSAGES)
 log_debug(f"turn_llm_calls: {len(llm_calls)} deduped responses")
 
 # Fallback for model/stop_reason when the transcript walk found nothing
@@ -87,19 +89,24 @@ for call in llm_calls:
     start_ns = call["start_ns"] or turn_start_ns
     if start_ns > end_ns:
         start_ns = end_ns
+    attrs = {
+        **common,
+        "gen_ai.operation.name":              "chat",
+        "gen_ai.request.model":               call["model"],
+        "gen_ai.response.id":                 call["message_id"],
+        "agent.stop_reason":                  call["stop_reason"],
+        "gen_ai.usage.input_tokens":          usage.get("input_tokens", 0),
+        "gen_ai.usage.output_tokens":         usage.get("output_tokens", 0),
+        "gen_ai.usage.cache_creation_tokens": usage.get("cache_creation_input_tokens", 0),
+        "gen_ai.usage.cache_read_tokens":     usage.get("cache_read_input_tokens", 0),
+    }
+    if LOG_MESSAGES:
+        attrs["gen_ai.input.messages"]  = format_genai_input_messages(call.get("input_messages") or [])
+        attrs["gen_ai.output.messages"] = format_genai_output_messages(
+            call.get("content_blocks") or [], call["stop_reason"])
     specs.append({
         "name": "claude_code.llm_call",
-        "attributes": {
-            **common,
-            "gen_ai.operation.name":              "chat",
-            "gen_ai.request.model":               call["model"],
-            "gen_ai.response.id":                 call["message_id"],
-            "agent.stop_reason":                  call["stop_reason"],
-            "gen_ai.usage.input_tokens":          usage.get("input_tokens", 0),
-            "gen_ai.usage.output_tokens":         usage.get("output_tokens", 0),
-            "gen_ai.usage.cache_creation_tokens": usage.get("cache_creation_input_tokens", 0),
-            "gen_ai.usage.cache_read_tokens":     usage.get("cache_read_input_tokens", 0),
-        },
+        "attributes": attrs,
         "start_time_ns": start_ns,
         "end_time_ns":   end_ns,
         "turn_role":     "child",

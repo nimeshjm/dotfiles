@@ -11,7 +11,8 @@
     "OTEL_EXPORTER_OTLP_HEADERS": "x-honeycomb-team=hcaik_FILL_IN_YOUR_KEY",
 
     "OTEL_LOG_TOOL_DETAILS": "0",
-    "OTEL_LOG_TOOL_CONTENT": "0"
+    "OTEL_LOG_TOOL_CONTENT": "0",
+    "OTEL_LOG_MESSAGES": "0"
   },
 
   "hooks": {

@@ -82,7 +82,8 @@ def _parse_ts_ns(ts: str) -> "int | None":
         return None
 
 
-def turn_llm_calls(path: str, max_lines: int = 2000) -> "list[dict[str, Any]]":
+def turn_llm_calls(path: str, max_lines: int = 2000,
+                   include_content: bool = False) -> "list[dict[str, Any]]":
     """One record per deduped assistant API response in the current turn,
     oldest-first. A single API response spans multiple consecutive JSONL lines
     (one per content block) sharing message.id — collapse them, keeping the
@@ -91,6 +92,13 @@ def turn_llm_calls(path: str, max_lines: int = 2000) -> "list[dict[str, Any]]":
     Turn boundary: walk backwards to the last *real* user text entry. User
     entries whose content is a list of tool_result blocks (no "text" block)
     do NOT terminate the walk; entries flagged isMeta are also skipped.
+
+    When include_content is True, each call dict gains:
+    - content_blocks: assistant content blocks accumulated across all lines
+      sharing the message.id
+    - input_messages: list of {"role": "user" | "tool", "blocks": [...]}
+      for each non-isMeta user entry since the previous API response
+
     Returns [] on any error (fail-open).
     """
     try:
@@ -114,14 +122,19 @@ def turn_llm_calls(path: str, max_lines: int = 2000) -> "list[dict[str, Any]]":
         calls: "list[dict[str, Any]]" = []
         by_id: "dict[str, dict[str, Any]]" = {}
         prev_ts: "int | None" = None
+        pending_input: "list[dict]" = []
         for entry in entries:
             ts = _parse_ts_ns(entry.get("timestamp", ""))
             if entry.get("type") == "assistant":
                 msg = entry.get("message") or {}
                 mid = msg.get("id", "")
+                raw = msg.get("content")
+                blocks = [b for b in raw if isinstance(b, dict)] if isinstance(raw, list) else []
                 if mid and mid in by_id:
                     if ts:                      # later line of same API response
                         by_id[mid]["end_ns"] = ts
+                    if include_content:
+                        by_id[mid]["content_blocks"].extend(blocks)
                 elif mid:
                     call = {
                         "message_id":  mid,
@@ -131,13 +144,123 @@ def turn_llm_calls(path: str, max_lines: int = 2000) -> "list[dict[str, Any]]":
                         "start_ns":    prev_ts,   # may be None for the first call
                         "end_ns":      ts,
                     }
+                    if include_content:
+                        call["content_blocks"] = blocks
+                        call["input_messages"] = pending_input
+                        pending_input = []
                     by_id[mid] = call
                     calls.append(call)
+            elif include_content and entry.get("type") == "user" and not entry.get("isMeta"):
+                content = (entry.get("message") or {}).get("content")
+                if isinstance(content, str) and content.strip():
+                    pending_input.append({"role": "user", "blocks": [{"type": "text", "text": content}]})
+                elif isinstance(content, list):
+                    blocks = [b for b in content if isinstance(b, dict)]
+                    if blocks:
+                        pending_input.append({"role": "user", "blocks": blocks})
             if ts:
                 prev_ts = ts
         return calls
     except (OSError, ValueError):
         return []
+
+
+_GENAI_ATTR_CAP = 16_000  # chars per serialized gen_ai.*.messages attribute
+
+
+def _flatten_tool_result(content: Any) -> str:
+    """tool_result inner content -> plain string."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for b in content:
+            if isinstance(b, dict) and b.get("type") == "text":
+                parts.append(b.get("text", ""))
+            elif isinstance(b, dict):
+                parts.append(f"[{b.get('type', 'block')}]")
+        return "\n".join(parts)
+    return str(content)
+
+
+def _block_to_part(block: "dict[str, Any]") -> "dict[str, Any] | None":
+    """Transcript content block -> OTel GenAI semconv message part. None = skip."""
+    btype = block.get("type")
+    if btype == "text":
+        return {"type": "text", "content": block.get("text", "")}
+    if btype == "tool_use":
+        return {"type": "tool_call", "id": block.get("id", ""),
+                "name": block.get("name", ""), "arguments": block.get("input") or {}}
+    if btype == "tool_result":
+        return {"type": "tool_call_response", "id": block.get("tool_use_id", ""),
+                "result": _flatten_tool_result(block.get("content"))}
+    if btype == "thinking":
+        return None  # large and has no stable semconv part type
+    return {"type": "text", "content": f"[{btype} omitted]"}
+
+
+def _dump_capped(messages: "list[dict]", cap: int) -> str:
+    """json.dumps(messages) kept under cap by clamping part payloads, then
+    dropping oldest messages. Always returns valid JSON (never a sliced string)."""
+    def dump() -> str:
+        return json.dumps(messages, ensure_ascii=False, default=str)
+
+    s = dump()
+    if len(s) <= cap:
+        return s
+    for limit in (4000, 1000, 200):
+        for m in messages:
+            for p in m.get("parts", []):
+                for key in ("content", "result"):
+                    v = p.get(key)
+                    if isinstance(v, str) and len(v) > limit:
+                        p[key] = v[:limit] + f"...[truncated {len(v) - limit} chars]"
+                a = p.get("arguments")
+                if a is not None:
+                    aj = json.dumps(a, ensure_ascii=False, default=str)
+                    if len(aj) > limit:
+                        p["arguments"] = aj[:limit] + "...[truncated]"
+        s = dump()
+        if len(s) <= cap:
+            return s
+    while len(messages) > 1:
+        messages.pop(0)
+        s = dump()
+        if len(s) <= cap:
+            return s
+    return json.dumps([{"role": "truncated", "parts": [
+        {"type": "text", "content": "messages exceeded attribute cap"}]}])
+
+
+def format_genai_input_messages(input_messages: "list[dict]",
+                                cap: int = _GENAI_ATTR_CAP) -> str:
+    """input_messages records from turn_llm_calls -> gen_ai.input.messages JSON.
+    Role is "tool" when an entry is purely tool_result blocks (semconv style)."""
+    try:
+        messages = []
+        for im in input_messages:
+            blocks = im.get("blocks") or []
+            parts = [p for p in (_block_to_part(b) for b in blocks) if p]
+            if not parts:
+                continue
+            all_tool_results = all(
+                isinstance(b, dict) and b.get("type") == "tool_result" for b in blocks)
+            messages.append({"role": "tool" if all_tool_results else "user",
+                             "parts": parts})
+        return _dump_capped(messages, cap)
+    except Exception:
+        return "[]"
+
+
+def format_genai_output_messages(content_blocks: "list[dict]", stop_reason: str,
+                                 cap: int = _GENAI_ATTR_CAP) -> str:
+    """Assistant content blocks for one API response -> gen_ai.output.messages JSON."""
+    try:
+        parts = [p for p in (_block_to_part(b) for b in content_blocks) if p]
+        return _dump_capped(
+            [{"role": "assistant", "parts": parts, "finish_reason": stop_reason}], cap)
+    except Exception:
+        return "[]"
 
 
 def read_turn_data(path: str, max_lines: int = 300) -> dict[str, Any]:

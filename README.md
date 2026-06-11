@@ -78,7 +78,6 @@ Supports two backends:
   - Honeycomb: `https://api.honeycomb.io`
   - SigNoz: `http://localhost:4318`
 - `OTEL_EXPORTER_OTLP_HEADERS=x-honeycomb-team=YOUR_KEY` — Honeycomb ingest key
-- `OTEL_LOG_USER_PROMPTS=0` — Don't log user input (privacy)
 - `OTEL_LOG_TOOL_DETAILS=0` — Don't log tool parameters
 - `OTEL_LOG_TOOL_CONTENT=0` — Don't log tool output
 

@@ -97,7 +97,8 @@ named *Claude Code Sessions* already exists.
 | UserPromptSubmit | `claude_code.user_prompt` | turn.id, prompt.char_length, prompt.word_count, command.name* |
 | PostToolUse | `claude_code.tool` | turn.id, gen_ai.tool.name, gen_ai.tool.success=true, tool.duration_ms, edit.lines_added/removed* |
 | PostToolUseFailure | `claude_code.tool` | turn.id, gen_ai.tool.name, gen_ai.tool.success=false, error.message, error.type |
-| Stop | `claude_code.turn.stop` | turn.id, gen_ai.request.model, stop_reason, all 4 token counts, cache_hit_ratio |
+| Stop | `claude_code.turn.stop` | turn.id, gen_ai.request.model, stop_reason, all 4 token counts (summed across all API responses), cache_hit_ratio, turn.llm_calls; spans entire turn duration (UserPromptSubmit → Stop) and serves as the trace root |
+| Stop | `claude_code.llm_call` | gen_ai.request.model, gen_ai.response.id, agent.stop_reason, gen_ai.usage.input_tokens, gen_ai.usage.output_tokens, gen_ai.usage.cache_creation_tokens, gen_ai.usage.cache_read_tokens; child of turn.stop, emitted once per deduped API response |
 | StopFailure | `claude_code.turn.stop_failure` | error.type |
 | SubagentStart | `claude_code.subagent.start` | agent.id, agent.type |
 | SubagentStop | `claude_code.subagent` | agent.id, agent.type, agent.duration_ms |
@@ -116,6 +117,19 @@ Every span also receives `session.id`, `cwd`, `git.repo`, and `git.origin` from 
 > **Note on `git.*` attributes**: only SSH-shaped remotes (`git@host:org/repo.git`) populate
 > `git.origin` and `git.repo`. Repos using HTTPS remotes will show empty `git.*` attributes
 > by design — HTTPS URLs may contain embedded credentials and are never exported to spans.
+
+## Trace model
+
+Each turn produces a single deterministic trace, derived as follows:
+
+- **Trace ID** (16 bytes, hex): first 16 bytes of `sha256("{session_id}:{turn_id}")`
+- **Root span ID** (8 bytes, hex): next 8 bytes of the same hash
+- **Root span**: `claude_code.turn.stop` spans the entire turn (from UserPromptSubmit to Stop), emitted by the Stop hook
+- **Child spans**: all mid-turn spans (user_prompt, tool, permission, notification, compact, subagent, llm_call) link to the root via remote parent context across separate hook processes — no in-band W3C traceparent propagation; each child hook reads the derived trace/span IDs from state files
+- **Out-of-turn spans**: session start/end and any hook firing with no active turn state remain standalone root spans
+- **Root claiming**: when a turn ends, either Stop or StopFailure fires first and claims the trace root by popping the turn state file — whichever runs second skips span emission
+
+Debug mode: set `OTEL_HOOKS_CONSOLE_EXPORT=1` to print spans to stdout instead of exporting via OTLP.
 
 **Removed hooks** (deleted; see git history if ever needed):
 - `CwdChanged` — redundant; `cwd` is already on every tool span
@@ -317,9 +331,10 @@ To recreate the board after deleting it, run `python3 .claude/install.py` first 
 
 Set in `.claude/settings.json` env section. All off by default.
 
+**Prompt text is never captured or exported** — there is no opt-in flag for `gen_ai.prompt` attributes.
+
 | Env var | What it adds | Privacy risk |
 |---|---|---|
-| `OTEL_LOG_USER_PROMPTS=1` | Prompt text (first 2000 chars) on `user_prompt` spans | Sends prompt content to OTLP backend — may contain secrets or PII |
 | `OTEL_LOG_TOOL_DETAILS=1` | Tool input args on `tool` spans | May expose file paths, code, or commands |
 | `OTEL_LOG_TOOL_CONTENT=1` | Tool output on `tool` spans | May expose file contents or command output |
 
@@ -350,9 +365,16 @@ Use absolute paths in the command fields instead of `${CLAUDE_PROJECT_DIR}`.
 
 ## Known limitations
 
-- **SDK init overhead**: Each hook is a short-lived Python process that instantiates a new
-  `TracerProvider` and `SimpleSpanProcessor` on every call (~100–300ms). For high-frequency
-  tool use sessions, PreToolUse + PostToolUse together add ~200–600ms of latency per tool call.
+- **SDK init overhead**: PreToolUse + PostToolUse each instantiate a `TracerProvider` (~100–300ms each);
+  Stop batches all of a turn's spans (turn root + `llm_call` children) through a single provider.
+  For high-frequency tool use sessions, tool hooks together add ~200–600ms of latency per tool call.
+- **W3C traceparent propagation out of scope**: Hooks cannot inject W3C headers into Claude Code's own HTTP
+  calls (Anthropic API requests, CLI subprocesses). Cross-process correlation is achieved via deterministic
+  per-turn trace IDs instead — all spans in a turn share the same trace_id, with root span linking via
+  remote parent context stored in state files.
+- **llm_call timing approximation**: `claude_code.llm_call` span timings are reconstructed from transcript
+  entry timestamps, so span start times reflect the previous transcript event rather than the actual API
+  request start. Use span durations and end times for relative timing; treat start times as approximate.
 - **State file leaks**: Start-time state is coordinated via `~/.cache/claude-hooks/` (files
   named `claude_hook_*`, `claude_perm_*`, `claude_turn_*`, `claude_compact_*`). The directory
   is created with mode `0700`; files are written with `O_NOFOLLOW` to resist symlink attacks.

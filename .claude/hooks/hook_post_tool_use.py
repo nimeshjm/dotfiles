@@ -50,4 +50,4 @@ if os.environ.get("OTEL_LOG_TOOL_CONTENT") == "1":
     response = data.get("tool_response", "")
     attrs["gen_ai.tool.output"] = str(response)[:2000]
 
-emit_span("claude_code.tool", attrs, start_time_ns=start_ns, end_time_ns=now)
+emit_span("claude_code.tool", attrs, start_time_ns=start_ns, end_time_ns=now, session_id=session_id, turn_id=turn_id)

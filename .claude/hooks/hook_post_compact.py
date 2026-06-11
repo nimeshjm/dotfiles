@@ -10,11 +10,12 @@ stdin fields:
   context_size_tokens (tokens after compaction)
 """
 import time, json
-from otel_span import read_stdin, emit_span, pop_state
+from otel_span import read_stdin, emit_span, pop_state, read_state
 
 data         = read_stdin()
 now          = time.time_ns()
 session_id   = data.get("session_id", "")
+turn_id      = read_state(f"claude_turn_{session_id}.id")  # Join the current turn's trace if one is active (read, don't consume)
 tokens_after = data.get("context_size_tokens", 0)
 
 start_ns      = now
@@ -33,6 +34,7 @@ emit_span(
     {
         "session.id":              session_id,
         "cwd":                     data.get("cwd", ""),
+        "turn.id":                 turn_id,
         "compaction.trigger":      data.get("trigger", "auto"),
         "context.tokens_before":   tokens_before,
         "context.tokens_after":    tokens_after,
@@ -41,4 +43,6 @@ emit_span(
     },
     start_time_ns=start_ns,
     end_time_ns=now,
+    session_id=session_id,
+    turn_id=turn_id,
 )

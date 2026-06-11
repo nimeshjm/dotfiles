@@ -12,13 +12,14 @@ stdin fields:
   permission_mode: current mode at time of request
 """
 import time
-from otel_span import read_stdin, emit_span, write_state
+from otel_span import read_stdin, emit_span, write_state, read_state
 
 data        = read_stdin()
 now         = time.time_ns()
 tool_name   = data.get("tool_name", "unknown")
 tool_use_id = data.get("tool_use_id", tool_name)
 session_id  = data.get("session_id", "")
+turn_id     = read_state(f"claude_turn_{session_id}.id")  # Join the current turn's trace if one is active (read, don't consume)
 
 # Persist so we can compute human-decision latency downstream
 write_state(f"claude_perm_{session_id}_{tool_use_id}.ts", str(now))
@@ -28,10 +29,13 @@ emit_span(
     {
         "session.id":            session_id,
         "cwd":                   data.get("cwd", ""),
+        "turn.id":               turn_id,
         "gen_ai.tool.name":      tool_name,
         "tool_use_id":           tool_use_id,
         "permission.mode":       data.get("permission_mode", ""),
     },
     start_time_ns=now,
     end_time_ns=now,
+    session_id=session_id,
+    turn_id=turn_id,
 )

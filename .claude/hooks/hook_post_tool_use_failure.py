@@ -43,4 +43,7 @@ emit_span(
     end_time_ns=now,
     status_ok=False,
     error_message=error,
+    error_type=data.get("error_type", "unknown"),
+    session_id=session_id,
+    turn_id=turn_id,
 )

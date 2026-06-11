@@ -14,6 +14,7 @@ Install once:
 from __future__ import annotations
 
 import datetime
+import hashlib
 import os
 import sys
 import time
@@ -23,12 +24,19 @@ from typing import IO, Any
 
 # ── OTel imports ──────────────────────────────────────────────────────────────
 try:
-    from opentelemetry import trace
     from opentelemetry.sdk.resources import Resource
     from opentelemetry.sdk.trace import TracerProvider
-    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export import ConsoleSpanExporter, SimpleSpanProcessor
+    from opentelemetry.sdk.trace.id_generator import RandomIdGenerator
     from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
-    from opentelemetry.trace import SpanKind, StatusCode
+    from opentelemetry.trace import (
+        NonRecordingSpan,
+        SpanContext,
+        SpanKind,
+        StatusCode,
+        TraceFlags,
+        set_span_in_context,
+    )
     _OTEL_AVAILABLE = True
 except ImportError:
     _OTEL_AVAILABLE = False
@@ -37,6 +45,8 @@ except ImportError:
 def _get_exporter() -> "OTLPSpanExporter | None":
     if not _OTEL_AVAILABLE:
         return None
+    if os.environ.get("OTEL_HOOKS_CONSOLE_EXPORT") == "1":
+        return ConsoleSpanExporter()
     endpoint = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", "").rstrip("/")
     if not endpoint:
         return None
@@ -45,6 +55,36 @@ def _get_exporter() -> "OTLPSpanExporter | None":
         kv.split("=", 1) for kv in headers_raw.split(",") if "=" in kv
     )
     return OTLPSpanExporter(endpoint=f"{endpoint}/v1/traces", headers=headers)
+
+
+def derive_turn_ids(session_id: str, turn_id: str) -> "tuple[int, int]":
+    """Deterministic (trace_id, root_span_id) for a turn.
+
+    trace_id = first 16 bytes of sha256("{session_id}:{turn_id}"),
+    root span_id = next 8 bytes. Zero ids are invalid in OTel, so map to 1.
+    """
+    digest = hashlib.sha256(f"{session_id}:{turn_id}".encode()).digest()
+    trace_id = int.from_bytes(digest[:16], "big") or 1
+    span_id = int.from_bytes(digest[16:24], "big") or 1
+    return trace_id, span_id
+
+
+class _PresetIdGenerator(RandomIdGenerator if _OTEL_AVAILABLE else object):
+    """Returns the preset trace_id always, and the preset span_id exactly once
+    (for the turn-root span); subsequent span ids are random (children)."""
+
+    def __init__(self, trace_id: int, span_id: "int | None"):
+        self._trace_id = trace_id
+        self._span_id = span_id
+
+    def generate_trace_id(self) -> int:
+        return self._trace_id
+
+    def generate_span_id(self) -> int:
+        if self._span_id is not None:
+            sid, self._span_id = self._span_id, None
+            return sid
+        return super().generate_span_id()
 
 _STATE_DIR = os.path.expanduser("~/.cache/claude-hooks")
 
@@ -176,26 +216,32 @@ def get_git_context(cwd: str = "") -> dict[str, str]:
 
     return {"git.origin": origin, "git.repo": repo_name}
 
-def emit_span(
-    name: str,
-    attributes: dict[str, Any],
+def emit_spans(
+    specs: "list[dict[str, Any]]",
     *,
-    start_time_ns: int | None = None,
-    end_time_ns: int | None = None,
-    status_ok: bool = True,
-    error_message: str = "",
+    session_id: str = "",
+    turn_id: str = "",
 ) -> None:
-    """
-    Fire-and-forget: create one span, export it, done.
-    Safe to call from short-lived hook scripts.
+    """Emit one or more spans through a single TracerProvider.
+
+    Each spec is a dict:
+      name (str, required), attributes (dict, required),
+      start_time_ns (int|None), end_time_ns (int|None),
+      status_ok (bool, default True), error_message (str, default ""),
+      error_type (str, default ""),
+      turn_role: "root" | "child" | "standalone" (default "child")
+
+    If turn_id is empty, every spec degrades to a standalone root span.
+    If turn_id is set:
+      - the "root" spec gets the derived (trace_id, span_id) via _PresetIdGenerator
+      - "child" specs get a remote parent context pointing at the derived root
+      - "standalone" specs get a random root as before
     """
     if not _OTEL_AVAILABLE:
-        # Graceful degradation: just print to stderr so Claude Code shows it
-        print(f"[otel_span] OTel not available — span '{name}' not exported", file=sys.stderr)
+        print(f"[otel_span] OTel not available — {len(specs)} span(s) not exported", file=sys.stderr)
         return
-
     exporter = _get_exporter()
-    if exporter is None:
+    if exporter is None or not specs:
         return
 
     service_name = os.environ.get("OTEL_SERVICE_NAME", "claude-code")
@@ -204,37 +250,97 @@ def emit_span(
         "gen_ai.system": "anthropic",
     })
 
-    provider = TracerProvider(resource=resource)
+    parent_ctx = None
+    id_generator = None
+    if session_id and turn_id:
+        trace_id, root_span_id = derive_turn_ids(session_id, turn_id)
+        parent_ctx = set_span_in_context(NonRecordingSpan(SpanContext(
+            trace_id=trace_id,
+            span_id=root_span_id,
+            is_remote=True,
+            trace_flags=TraceFlags(0x01),
+        )))
+        if any(s.get("turn_role") == "root" for s in specs):
+            id_generator = _PresetIdGenerator(trace_id, root_span_id)
+
+    if id_generator is not None:
+        provider = TracerProvider(resource=resource, id_generator=id_generator)
+    else:
+        provider = TracerProvider(resource=resource)
     provider.add_span_processor(SimpleSpanProcessor(exporter))
     tracer = provider.get_tracer("claude_code_hooks", "1.0.0")
 
+    git_attrs = get_git_context(specs[0].get("attributes", {}).get("cwd", ""))
     now_ns = time.time_ns()
-    start = start_time_ns or now_ns
-    end   = end_time_ns   or now_ns
 
-    # merge git context -- uses cwd already in attributes if present
-    git_attrs = get_git_context(attributes.get("cwd", ""))
-    attributes = {**git_attrs, **attributes}   # hook attrs win on collision
+    # Root first: the preset span_id is consumed by the first parentless start_span.
+    ordered = sorted(specs, key=lambda s: 0 if s.get("turn_role") == "root" else 1)
+    for spec in ordered:
+        attributes = {**git_attrs, **spec.get("attributes", {})}   # hook attrs win on collision
 
-    # Sanitise: OTel attribute values must be str/int/float/bool or lists thereof
-    clean: dict[str, Any] = {}
-    for k, v in attributes.items():
-        if isinstance(v, (str, int, float, bool)):
-            clean[k] = v
-        elif v is None:
-            clean[k] = ""
+        # Sanitise: OTel attribute values must be str/int/float/bool or lists thereof
+        clean: dict[str, Any] = {}
+        for k, v in attributes.items():
+            if isinstance(v, (str, int, float, bool)):
+                clean[k] = v
+            elif v is None:
+                clean[k] = ""
+            else:
+                clean[k] = str(v)
+
+        start = spec.get("start_time_ns") or now_ns
+        end = spec.get("end_time_ns") or now_ns
+        role = spec.get("turn_role", "child")
+        ctx = parent_ctx if (parent_ctx is not None and role == "child") else None
+
+        span = tracer.start_span(
+            spec["name"], context=ctx, kind=SpanKind.INTERNAL,
+            start_time=start, attributes=clean,
+        )
+        if not spec.get("status_ok", True):
+            error_message = spec.get("error_message", "")
+            span.set_status(StatusCode.ERROR, error_message)
+            span.add_event(
+                "exception",
+                {
+                    "exception.type": spec.get("error_type", "") or "Error",
+                    "exception.message": error_message,
+                },
+                timestamp=end,
+            )
         else:
-            clean[k] = str(v)
-
-    span = tracer.start_span(name, kind=SpanKind.INTERNAL, start_time=start, attributes=clean)
-    if not status_ok:
-        span.set_status(StatusCode.ERROR, error_message)
-    else:
-        span.set_status(StatusCode.OK)
-    span.end(end_time=end)
+            span.set_status(StatusCode.OK)
+        span.end(end_time=end)
 
     provider.force_flush(timeout_millis=3_000)
     provider.shutdown()
+
+
+def emit_span(
+    name: str,
+    attributes: dict[str, Any],
+    *,
+    start_time_ns: int | None = None,
+    end_time_ns: int | None = None,
+    status_ok: bool = True,
+    error_message: str = "",
+    error_type: str = "",
+    session_id: str = "",
+    turn_id: str = "",
+    turn_role: str = "child",
+) -> None:
+    """Fire-and-forget single span. Backwards compatible: callers that pass no
+    session_id/turn_id get a standalone root span exactly as before."""
+    emit_spans(
+        [{
+            "name": name, "attributes": attributes,
+            "start_time_ns": start_time_ns, "end_time_ns": end_time_ns,
+            "status_ok": status_ok, "error_message": error_message,
+            "error_type": error_type, "turn_role": turn_role,
+        }],
+        session_id=session_id,
+        turn_id=turn_id,
+    )
 
 
 def read_stdin() -> dict[str, Any]:

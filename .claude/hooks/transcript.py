@@ -8,6 +8,7 @@ large, so everything here scans backwards from the end of the file.
 """
 from __future__ import annotations
 
+import datetime
 import json
 from typing import Any, Iterator
 
@@ -68,6 +69,75 @@ def last_assistant_message(path: str) -> dict[str, Any]:
     except (OSError, ValueError) as e:
         log_debug(f"transcript read error: {e}")
     return {"model": "", "stop_reason": "unknown", "usage": {}}
+
+
+def _parse_ts_ns(ts: str) -> "int | None":
+    """ISO8601 transcript timestamp -> epoch ns, or None if unparseable."""
+    if not ts:
+        return None
+    try:
+        dt = datetime.datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        return int(dt.timestamp() * 1_000_000_000)
+    except ValueError:
+        return None
+
+
+def turn_llm_calls(path: str, max_lines: int = 2000) -> "list[dict[str, Any]]":
+    """One record per deduped assistant API response in the current turn,
+    oldest-first. A single API response spans multiple consecutive JSONL lines
+    (one per content block) sharing message.id — collapse them, keeping the
+    latest timestamp as end.
+
+    Turn boundary: walk backwards to the last *real* user text entry. User
+    entries whose content is a list of tool_result blocks (no "text" block)
+    do NOT terminate the walk; entries flagged isMeta are also skipped.
+    Returns [] on any error (fail-open).
+    """
+    try:
+        # 1. Collect this turn's entries, newest-first.
+        entries: "list[dict]" = []
+        for entry in iter_entries_reversed(path, max_lines):
+            entries.append(entry)
+            if entry.get("type") != "user" or entry.get("isMeta"):
+                continue
+            content = (entry.get("message") or {}).get("content")
+            is_text_user = (
+                (isinstance(content, str) and content.strip()) or
+                (isinstance(content, list) and any(
+                    isinstance(b, dict) and b.get("type") == "text" for b in content))
+            )
+            if is_text_user:
+                break  # boundary entry stays in the list: it seeds prev_ts
+
+        # 2. Replay oldest-first, deduping assistant entries by message.id.
+        entries.reverse()
+        calls: "list[dict[str, Any]]" = []
+        by_id: "dict[str, dict[str, Any]]" = {}
+        prev_ts: "int | None" = None
+        for entry in entries:
+            ts = _parse_ts_ns(entry.get("timestamp", ""))
+            if entry.get("type") == "assistant":
+                msg = entry.get("message") or {}
+                mid = msg.get("id", "")
+                if mid and mid in by_id:
+                    if ts:                      # later line of same API response
+                        by_id[mid]["end_ns"] = ts
+                elif mid:
+                    call = {
+                        "message_id":  mid,
+                        "model":       msg.get("model", ""),
+                        "stop_reason": msg.get("stop_reason") or "unknown",
+                        "usage":       msg.get("usage") or {},
+                        "start_ns":    prev_ts,   # may be None for the first call
+                        "end_ns":      ts,
+                    }
+                    by_id[mid] = call
+                    calls.append(call)
+            if ts:
+                prev_ts = ts
+        return calls
+    except (OSError, ValueError):
+        return []
 
 
 def read_turn_data(path: str, max_lines: int = 300) -> dict[str, Any]:

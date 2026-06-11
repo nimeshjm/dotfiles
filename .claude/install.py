@@ -489,6 +489,20 @@ _HC_OP_MAP = {
 }
 
 
+def _existing_honeycomb_headers() -> str:
+    """Return the Honeycomb OTLP headers already configured in ~/.claude/settings.json,
+    or "" if absent, non-Honeycomb, or still the placeholder — so reinstalling
+    never clobbers a working API key."""
+    try:
+        env = json.loads((HOME_CLAUDE / "settings.json").read_text()).get("env", {})
+    except (OSError, json.JSONDecodeError):
+        return ""
+    headers = env.get("OTEL_EXPORTER_OTLP_HEADERS", "")
+    if headers.startswith("x-honeycomb-team=") and "FILL_IN" not in headers:
+        return headers
+    return ""
+
+
 class HoneycombBackend:
     """Honeycomb backend — preserves the existing Honeycomb board workflow."""
 
@@ -497,7 +511,8 @@ class HoneycombBackend:
     def otel_env(self) -> dict[str, str]:
         return {
             "OTEL_EXPORTER_OTLP_ENDPOINT": "https://api.honeycomb.io",
-            "OTEL_EXPORTER_OTLP_HEADERS": "x-honeycomb-team=hcaik_FILL_IN_YOUR_KEY",
+            "OTEL_EXPORTER_OTLP_HEADERS": _existing_honeycomb_headers()
+                or "x-honeycomb-team=hcaik_FILL_IN_YOUR_KEY",
         }
 
     def _ir_to_hc_spec(self, query: dict) -> dict:

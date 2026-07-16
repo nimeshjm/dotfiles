@@ -155,7 +155,7 @@ emitter (`emit_span`, `read_stdin`) it provides:
 tools called, LOC changes, user prompt, and final summary.
 
 `jira_comment.py` posts a turn summary to the Jira ticket named in the git
-branch (`CSMP-1234-description` → `CSMP-1234`) via the `jira` CLI. Called by
+branch (`PROJ-1234-description` → `PROJ-1234`) via the `jira` CLI. Called by
 `hook_stop.py` after span emission; fails soft and logs to `hook_stop.log`.
 
 ## Derived metrics (copy-paste Honeycomb queries)

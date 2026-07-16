@@ -3,7 +3,7 @@
 jira_comment.py — post a turn summary to the Jira ticket named in the git branch.
 
 Called by hook_stop.py after span emission. Branch names follow the
-{PROJECT}-{NUMBER}-{description} convention (e.g. CSMP-1234-fix-login), so the
+{PROJECT}-{NUMBER}-{description} convention (e.g. PROJ-1234-fix-login), so the
 ticket ID is extracted from the branch and a Markdown comment summarising the
 turn (request, summary, tools, code changes, plan) is posted via the jira CLI.
 Everything fails soft: any error is logged and the hook continues.
@@ -24,7 +24,7 @@ JIRA_COMMENT_LIMIT = 32_000
 
 
 def extract_branch_ticket(cwd: str) -> str:
-    """Return Jira ticket ID from the active git branch, e.g. 'CSMP-1234'."""
+    """Return Jira ticket ID from the active git branch, e.g. 'PROJ-1234'."""
     try:
         r = subprocess.run(
             ["git", "branch", "--show-current"],
